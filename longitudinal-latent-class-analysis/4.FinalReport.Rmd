@@ -1,0 +1,434 @@
+---
+title: 'Exploring Longitudinal Pulmonary Exacerbation Outcome Trajectories in Cystic Fibrosis Patients'
+author: |
+ | Brenton Graham
+ | `r format(Sys.Date(), '%m/%d/%Y')`
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+header-includes:
+  - \usepackage{multirow}
+  - \newcommand{\beginsupplement}{\setcounter{table}{0}  \renewcommand{\thetable}{S\arabic{table}} \setcounter{figure}{0} \renewcommand{\thefigure}{S\arabic{figure}}}
+output:
+  pdf_document
+fontsize: 11.5pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+require(tidyverse)
+require(ggpubr)
+require(naniar)
+require(tableone)
+require(lcmm)
+require(magrittr)
+require(scales)
+require(nnet)
+require(kableExtra)
+```
+
+```{r}
+# Import and factor data
+data <- read_delim("883LongitudinalData.csv", delim=",") %>%
+  mutate(time = factor(time, levels = c(1, 2, 3), labels = c("Admission", "Discharge", "Follow-Up")),
+         gender = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+         genotype = factor(genotype, levels = c(0:2), labels = c("0 F508del", "1 F508del", "2 F508del")),
+         admit.cf_pathogens = factor(admit.cf_pathogens),
+         admit.coinfect = factor(admit.coinfect),
+         hosp_pastyr = case_when(
+           hosp_pastyr == 0 ~ "0",
+           hosp_pastyr == 1 ~ "1",
+           hosp_pastyr > 1 ~ "2+"
+         ), hosp_pastyr = factor(hosp_pastyr, levels = c("0", "1", "2+")),
+         log_crp = log(crp),
+         log_elastase = log(elastase)) %>%
+  dplyr::select(-pe_pastyr) %>%
+  unite("ID", sid:time, sep = "_", remove = FALSE) %>%
+  column_to_rownames("ID")
+```
+
+# Introduction
+Pulmonary exacerbations (PEx) are a leading cause of morbidity in cystic fibrosis (CF). Treatment response, which can be assessed through a variety of clinical markers, is often suboptimal despite seemingly appropriate antimicrobial therapy and can be quite variable among patients. In this study, CF patients were evaluated at three time points over the course of a PEx in order to assess treatment effectiveness. Time points include admission, hospital discharge and a follow-up clinic visit. PEx-related outcomes were measured at each time point, including lung function, PEx scores, and inflammation markers. Using neutrophil elastase, a marker of inflammation and lung disease, as a biological proxy for treatment response, we first aim to cluster patients into treatment response trajectory groups with a latent class mixed model (LCMM) approach. We then aim to identify potential baseline predictors of treatment response trajectory using the latent classes assigned by the model.  
+
+# Methods
+## The Data
+Data from 34 CF patients and 39 PEx are present in this data set (i.e., five subjects were evaluated over the course of two separate PEXs). For each PEx there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days. All 39 PEx observations are treated independently throughout the study. The outcome of interest in this study is neutrophil elastase, a marker of inflammation and lung disease. Elastase measurements were log-transformed to handle skewness and more closely approximate a Gaussian distribution. Predictors of interest include baseline age, BMI, genotype (number of F508del mutations), number of hospitalizations in the past year, and CF pathogen measurements (as measured by 16S sequencing).  
+
+## Exploratory Data Analysis
+Summary statistics and data visualizations were used to explore clinical outcomes over time. Data visualizations of log-transformed elastase are shown in Figure S1 (Supplementary Section). Figure S1-A shows the distribution of the outcome stratified by time point within a PEx. Figure S1-B shows subject-level change in the outcome over the course of a PEx.  
+
+## Statistical Analysis
+The primary aim of this analysis was to characterize baseline risk factors associated with treatment response trajectory (as measured by neutrophil elastase). A two-step statistical analysis was conducted to perform this assessment. First, we used a latent class mixed model (LCMM) approach to cluster subjects into latent classes based on treatment response trajectories. Second, we performed a post-hoc analysis to determine if associations exist between baseline risk factors and treatment response trajectory group. Specifications for each analysis step are provided below.
+
+### Latent Class Mixed Modeling
+As mentioned, latent class analysis (LCA) was used to assign latent classes to each subject based on elastase trajectory over time. The `lcmm` package in R was used to perform LCA. LCMMs require users to specify the number of latent classes that should be fit to the data. The optimal number of latent classes is not always trivial, however, so multiple models usually need to be fit and compared to determine the number of classes that best fit the data. We fit LCMMs with 2-5 latent classes for comparison. All LCMM models were fit using time as a fixed-effect, a random intercept for subject ID, and a random-effect for time. We include these random effects to account for the subject-to-subject variability at the intercept and additional between-subject correlation at each time point. Time was used as the only fixed effect so that latent classes were based solely on the outcome trajectory. Additionally, time was set as a class variable due to the limited number of time points and the apparent non-linear association between time and the outcome. We tested different variance-covariance matrix structures for the random-effects, including unstructured and diagonal matrices (similar to banded main diagonal, or UN(1) in SAS), for each number of latent classes. This resulted in a total of eight LCMM models for comparison. The final model was selected using a holistic approach; we considered a combination of AIC, latent class balance and visualizations to make the final decision (Table S1 and Figure S2). The selected model uses four latent classes and a diagonal variance-covariance matrix structures for the random-effects. Latent classes were assigned qualitative names based on mean group trajectory (Figure 1). First, latent classes are separated by baseline elastase levels, which can be considered "high" and "low" groups. Second, within each "high" and "low" group there are sub-groups of "responders" and "non-responders".  
+
+```{r}
+# Latent class mixed modeling
+set.seed(8008) # Set seed for reproducibility
+
+# Base model with one latent class
+m1 <- hlme(
+  log_elastase ~ time, random = ~1 + time, subject = 'sid', data = data, 
+  ng = 1, idiag = T, verbose = F)
+
+# Unstructured variance-covariance structure
+m1.unstr <- hlme(
+  log_elastase ~ time, random = ~1 + time, subject = 'sid',
+  data = data, ng = 1, idiag = F, verbose = F)
+
+# Fit a variety of models with 2-5 latent classes
+# 2 Latent Classes -------------------------------------------------------------
+m2 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 2, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m2.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 2, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 3 Latent Classes -------------------------------------------------------------
+m3 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 3, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m3.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 3, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 4 Latent Classes -------------------------------------------------------------
+m4 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 4, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m4.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 4, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 5 Latent Classes -------------------------------------------------------------
+m5 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 5, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m5.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 5, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# Re-order classes to make sense of triage
+m2 <- permut(m2, order = c(2, 1))
+m3 <- permut(m3, order = c(1, 3, 2))
+m3.unstr <- permut(m3.unstr, order = c(2, 3, 1))
+m4 <- permut(m4, order = c(4, 3, 2, 1))
+m4.unstr <- permut(m4.unstr, order = c(3, 4, 2, 1))
+m5 <- permut(m5, order = c(1, 2, 5, 4, 3))
+m5.unstr <- permut(m5.unstr, order = c(2, 1, 3, 4, 5))
+
+# Merge SID latent class assignments
+latent_classes <- m2$pprob[, 1:2] %>%
+  merge(m2.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m3$pprob[, 1:2], by = "sid") %>%
+  merge(m3.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m4$pprob[, 1:2], by = "sid") %>%
+  merge(m4.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m5$pprob[, 1:2], by = "sid") %>%
+  merge(m5.unstr$pprob[, 1:2], by = "sid") %>%
+  set_colnames(c("sid", "ng2", "ng2_unstr", "ng3", "ng3_unstr", "ng4", "ng4_unstr", "ng5", "ng5_unstr"))
+```
+
+```{r, fig.dim=c(8, 3), fig.cap="Mean structure of treatment response trajectory by Latent Class"}
+# Plot trajectory of each latent class
+traj_data <- data.frame(time = c("Admission", "Discharge", "Follow-Up"))
+traj_pred <- predictY(m4, traj_data, var.time ="time", draws = TRUE)
+traj_pred$times = c(1, 2, 3)
+traj_pred$pred %>% as.data.frame() %>%
+  mutate(time = c("Admission", "Discharge", "Follow-Up")) %>%
+  pivot_longer(cols = c(Ypred_class1:upper.Ypred_class4)) %>%
+  separate("name", into = c("linetype", "class"), sep = "_") %>%
+  mutate(
+    class = case_when(
+      class == "class1" ~ 1,
+      class == "class2" ~ 2,
+      class == "class3" ~ 3,
+      class == "class4" ~ 4),
+    class = factor(class,
+      levels = c(2, 3, 1, 4),
+      labels = c("High, Non-Responder", "High, Responder", "Low, Non-Responder", "Low, Responder")),
+    time = case_when(
+      time == "Admission" ~ 1,
+      time == "Discharge" ~ 2,
+      time == "Follow-Up" ~ 3)) %>%
+  ggplot(aes(x = time, y = value, color = class, linetype = linetype, size = linetype)) +
+    geom_smooth() +
+    labs(y = "log(Elastase)", x = "Time", color = "Latent Class") +
+    ggtitle("Trajectory of Treatment Response by Latent Class") +
+    scale_color_manual(values = c("steelblue1", "goldenrod2", "red", "springgreen3")) +
+    scale_linetype_manual(values = c(5, 5, 1), guide = "none") +
+    scale_size_manual(values = c(0.3, 0.3, 1.8), guide = "none") +
+    scale_x_continuous(limits = c(0.8, 3.2), breaks = c(1, 2, 3)) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          text = element_text(size=12),
+          plot.title = element_text(hjust=0.5, size=11))
+```
+
+```{r}
+# Merge to full data frame
+data.latent.all_times <- data %>%
+  merge(latent_classes, by = "sid", all.x = T) %>%
+  mutate(
+    ng2 = factor(ng2), ng2_unstr = factor(ng2_unstr), 
+    ng3 = factor(ng3), ng3_unstr = factor(ng3_unstr), 
+    ng4 = factor(ng4), ng4_unstr = factor(ng4_unstr),
+    ng5 = factor(ng5), ng5_unstr = factor(ng5_unstr)) %>%
+  mutate(LC = factor(ng4,
+    levels = c(2, 3, 1, 4),
+    labels = c("High, Non-Responder", "High, Responder", "Low, Non-Responder", "Low, Responder")))
+
+# IDs for observations with class assignments > 0; Removes 2 subjects
+sid_highProb <- m4$pprob %>%
+  arrange(class, sid) %>%
+  mutate(max_prob = case_when(
+    prob1 > 0.8 ~ prob1,
+    prob2 > 0.8 ~ prob2,
+    prob3 > 0.8 ~ prob3,
+    prob4 > 0.8 ~ prob4
+  )) %>% drop_na() %>% pull(sid)
+
+# Remove obervations with non-separable classes
+data.modeling <- data.latent.all_times %>% 
+  #filter(sid %in% sid_highProb) %>% 
+  filter(time == "Admission")
+```
+
+### Post-Hoc Analysis
+Following LCMM selection and latent class assignment, we performed a post-hoc analysis that aimed to identify potential baseline risk factors associated with the different outcome trajectories. The post-hoc analysis was separated into two sections due to sample size considerations. In the first section we aim to identify differences between the high and low baseline elastase groups (i.e., responders and non-responders are grouped in together for each of the high and low groups). In the second section we aim to identify differences between responders and non-responders, regardless of baseline elastase group (i.e., all responders are grouped together and all non-responders are grouped together). A logistic regression framework is used in each section, using genotype (number of F508del mutations), presence of virus at admission, and baseline CF pathogen abundances as covariates. CF pathogens include Pseudomonas aeruginosa, Staphylococcus aureus, Achromobacter, Haemophilus, Stenotrophomonas, and Burkholderia, and were measured using 16S rRNA sequencing. A center-log ratio transformation was applied to the 16S compositional data. 
+
+# Results
+Table 1 describes the demographics and baseline risk factors of the study population, stratified by assigned latent class. Gender, age and BMI appear to be well-balanced across groups, aside from females not being represented in the "high responder" group with only 5 subjects, and are therefore not adjusted for within the post-hoc models. 
+
+```{r}
+vars <- c("gender", "age", "bmi", "genotype", "admit.virus", 
+          "pseudo_aer.seq", "staph_aur.seq", "achromobacter.seq", "hflu.seq", "smalto.seq", "burk.seq")
+cat_vars <- c("gender", "genotype", "admit.virus")
+table1 <- CreateTableOne(
+  vars = vars, factorVars = cat_vars, strata = "LC", data = data.modeling)
+print(table1, print = F, nonnormal = T, minMax = T) %>% 
+  as.data.frame() %>% 
+  dplyr::select(-test, -p) %>%
+  set_rownames(c("n", "Female (%)", "Age", "BMI", "Mutations", "0 F508del (%)",
+                 "1 F508del (%)", "2 F508del (%)", "Virus at Admission (%)", 
+                 "Pseudomonas aeruginosa", "Staphylococcus aureus", 
+                 "Achromobacter", "Haemophilus", "Stenotrophomonas", "Burkholderia")) %>%
+  knitr::kable(caption = "Demographics for study population by latent class", 
+               booktabs = T, format = "latex") %>%
+  kable_styling(latex_options=c("scale_down", "hold_position")) %>%
+  add_indent(c(6:8))
+```
+
+Fixed-effects estimates from the selected latent class mixed model are summarized in Table 2. These estimates provide statistical insight into the differences in latent class trajectories over time. Responder trajectories, for both the high and low elastase groups, are characterized by significant decreases in elastase from admission to discharge. Average decreases of 3.00 and 1.65 units are observed for these groups, respectively, with corresponding p-values below 0.001. Non-responder trajectories, for both the high and low elastase groups, are characterized by no significant change from admission to discharge or from admission to follow-up. Interestingly, no significant change in elastase is observed between admission and follow-up for the low elastase responder group. Separately, the high elastase responder group is associated with a significant elastase decrease between admission and follow-up ($p = 0.028$). The variance-covariance matrix of the random effects is shown in Table S2.  
+
+```{r}
+fixed_coef <- c(-0.19015, -3.00442, -0.05622, -1.65182, 0.01391, -0.90283, 0.13986, 0.01850)
+fixed_p <- c(0.35891, 0.00000, 0.74704, 0.00000, 0.96555, 0.02916, 0.57004, 0.95484)
+class_names <- rep(c("High, Non-Responder", "High, Responder", "Low, Non-Responder", "Low, Responder"), 2)
+time_desc <- c(rep("Discharge vs. Admission", 4), rep("Follow-Up vs. Admission", 4))
+
+fixed_effects_lcmm <- data.frame(
+  "LC" = class_names,
+  "TimeComp" = time_desc,
+  "Estimate" = fixed_coef,
+  "p-value" = fixed_p) %>%
+  mutate(Estimate = round(Estimate, 3), p.value = round(p.value, 3))
+
+fixed_effects_lcmm %>%
+  knitr::kable(caption = "Fixed Effects from LCMM", 
+               booktabs = T, format = "latex", 
+               col.names = c("Latent Class", "Time Comparison", "Estimate", "p-value")) %>%
+  kable_styling(latex_options="hold_position")
+```
+
+Results from the post-hoc logistic regression models are shown in Table 3. Estimates represent odds ratios. One-unit increases in Staphylococcus aureus and Stenotrophomonas (two CF pathogens) at baseline are associated with significantly increased odds of being in the high elastase group, as compared to being in the low elastase group. Separately, and unexpectedly, the odds of having 2 F508del mutations (compared to 0 F508del mutations) appear to be higher for the responder group as compared to the non-responder group. While not significant at an $\alpha$-level of 0.05, a one unit-increase in Staphylococcus aureus is associated with increased odds of being a responder, as compared to being a non-responder (OR = 1.37 [95% CI: 1.03, 2.02], p = 0.058). Box plots of CF pathogen distributions for each latent class are shown in Figure S3.
+
+```{r}
+# What characteristics separate the high and low elastase groups?
+data.high_vs_low <- data.modeling %>% 
+  dplyr::select(LC, genotype, admit.virus, contains(".seq")) %>%
+  mutate(high_elastase = case_when(
+    LC %in% c("Low, Non-Responder", "Low, Responder") ~ 0, 
+    LC %in% c("High, Non-Responder", "High, Responder") ~ 1), 
+    high_elastase = factor(high_elastase)) %>%
+  dplyr::select(-LC)
+
+# Logistic regression model
+model.high_vs_low <- glm(high_elastase ~ ., data = data.high_vs_low, family = "binomial")
+high_vs_low.results <- broom::tidy(model.high_vs_low, exponentiate = T, conf.int = T) %>%
+  filter(term != "(Intercept)") %>%
+  column_to_rownames("term") %>%
+  dplyr::select(-std.error, -statistic, hl_estimate = estimate, hl_p = p.value) %>%
+  mutate(hl_estimate = paste(sprintf("%.2f", hl_estimate), " (", sprintf("%.2f", conf.low), ", ", sprintf("%.2f", conf.high), ")", sep = ""),
+         hl_p = round(hl_p, 3),
+         sig = case_when(
+           hl_p > 0.05 ~ "",
+           hl_p <= 0.05 ~ "*"),
+         hl_p = paste(sprintf("%.3f", hl_p), sig, sep = "")) %>%
+  dplyr::select(-contains("conf"), -sig)
+
+# What characteristics separate the responder and non-responder groups?
+data.response <- data.modeling %>% 
+  dplyr::select(LC, genotype, admit.virus, contains(".seq")) %>%
+  mutate(responder = case_when(
+    LC %in% c("Low, Non-Responder", "High, Non-Responder") ~ 0, 
+    LC %in% c("Low, Responder", "High, Responder") ~ 1), 
+    responder = factor(responder)) %>%
+  dplyr::select(-LC)
+
+# Logistic regression model
+model.response <- glm(responder ~ ., data = data.response, family = "binomial")
+response.results <- broom::tidy(model.response, exponentiate = T, conf.int = T) %>%
+  filter(term != "(Intercept)") %>%
+  column_to_rownames("term") %>%
+  dplyr::select(-std.error, -statistic, resp_estimate = estimate, resp_p = p.value) %>%
+  mutate(resp_estimate = paste(sprintf("%.2f", resp_estimate), " (", sprintf("%.2f", conf.low), ", ", sprintf("%.2f", conf.high), ")", sep = ""),
+         resp_p = round(resp_p, 3),
+         sig = case_when(
+           resp_p > 0.05 ~ "",
+           resp_p <= 0.05 ~ "*"),
+         resp_p = paste(sprintf("%.3f", resp_p), sig, sep = "")) %>%
+  dplyr::select(-contains("conf"), -sig)
+
+# Present the results
+results <- cbind(high_vs_low.results, response.results)
+results %>%
+  set_rownames(c("1 F508del Mutation", "2 F508del Mutations", "Virus at Admission",
+                 "Pseudomonas aeruginosa", "Staphylococcus aureus", "Achromobacter", 
+                 "Haemophilus", "Stenotrophomonas", "Burkholderia")) %>%
+  knitr::kable(align = "cccccc", 
+               caption = "Results from Logistic Regression Models Comparing Latent Groups", 
+               col.names = c("Odds Ratio (95% CI)", "p-value", "Odds Ratio (95% CI)", "p-value"),
+               booktabs = T) %>%
+  add_header_above(c(" " = 1L, "High vs. Low Elastase" = 2L, "Responders vs. Non-Responders" = 2L)) %>%
+  kableExtra::kable_styling(latex_options = "hold_position")
+```
+
+
+# Discussion  
+Fixed effects from the LCMM suggest that subjects in the low elastase responder group return to pre-treatment elastase levels 10-14 days after discharge. This could potentially be interesting biologically. Perhaps lung disease activity is only quenched for this group during and directly after treatment. Meanwhile, high elastase responders see a signficant decrease between admission and follow-up, suggesting a more sustained response. Nonetheless, this significant finding still might not be clinically significant; high levels of elastase are still measured at follow-up which indicates undesired activity. When comparing latent class differences, it was interesting to see that an increase in Staphylococcus aureus is associated with a borderline significant odds increase in responder versus non-responder. On the surface, this effect appears to go against intuition; we wouldn't necessarily expect an increase in baseline CF pathogen to be associated with better treatment response. One thought here is that this could be an effect of treatment type, rather than CF pathogen. It's possible that subjects with increased Staphylococcus aureus were treated with an anti-microbial that targets this pathogen, and that this anti-microbial treatment is the reason for improved response. This is very speculative, however, and clinical data sets should be further explored to determine if treatment information is available.
+
+In light of the results here, limitations are prevalent and should be discussed. First, there should be skepticism when treating latent classes as biologically meaningful groups, especially since latent class assignments can be quite variable iteration-to-iteration (i.e., even for the same model). Correspondingly, post-hoc analysis results should be viewed as exploratory. Second, the sample size in this study is extremely limited, which is cause for concern when considering generalizability. Third, we treated all exacerbations as independent observations in this study even though some subjects enrolled more than once. Nonetheless, latent class analysis seems to be an interesting application of linear mixed models and can provide an interesting avenue of longitudinal analysis when meaningful classes aren't available. 
+
+\newpage
+# Contributions
+Thank you to Brandie Wagner, PhD, and Jonathan Kirk Harris, PhD.
+
+\newpage
+# Supplementary Figures & Tables
+
+\beginsupplement
+
+```{r, out.width = '100%', fig.cap = "Data visualizations of log-transformed elastase"}
+fig1 <- paste("elastase_plots.png", sep = "")
+knitr::include_graphics(fig1)
+```
+
+```{r}
+# Model comparison table
+sumtable <- summarytable(
+  m2, m2.unstr, m3, m3.unstr, m4, m4.unstr, m5, m5.unstr,
+  which = c("G", "AIC", "%class"), display = F) %>%
+  as.data.frame() %>%
+  round(1) %>%
+  replace(is.na(.), "") %>%
+  set_colnames(c("LC", "AIC", 
+                 "LC1", "LC2", "LC3", "LC4", "LC5")) %>%
+  mutate(LC1= ifelse(LC1 == "", "", paste(LC1, "%", sep = "")),
+         LC2 = ifelse(LC2 == "", "", paste(LC2, "%", sep = "")),
+         LC3 = ifelse(LC3 == "", "", paste(LC3, "%", sep = "")),
+         LC4 = ifelse(LC4 == "", "", paste(LC4, "%", sep = "")),
+         LC5 = ifelse(LC5 == "", "", paste(LC5, "%", sep = "")))
+
+sumtable$var_cov <- rep(c("Diagonal", "Unstructured"), 4)
+
+sumtable %>%
+  dplyr::select(LC, var_cov, everything()) %>%
+  knitr::kable(
+    caption = "Model comparison of latent class mixed-models fit with different numbers of latent classes",
+    row.names = F,
+    col.names = c("Latent Classes", "Var-Cov Structure", "AIC", 
+                 "LC1", "LC2", "LC3", "LC4", "LC5"),
+    booktabs = T, align = "ccccc") %>%
+  kableExtra::kable_styling(latex_options = "hold_position")
+```
+
+```{r, fig.dim=c(8, 8), fig.cap = "Spaghetti plots colored by latent class assignment for each model tested"}
+# Function to plot spaghetti plots of outcomes over time colored by latent class
+plot.latent.spaghetti <- function(data, ng, group, title) {
+  palette <- c("red", "steelblue1", "goldenrod2", "springgreen3", "grey20")[1:ng]
+  plot <- data %>%
+    ggplot(aes_string(x = "time", y = "log_elastase")) +
+    geom_point(aes_string(color = group), size = 0.8) +
+    geom_smooth(aes_string(color = group)) +
+    geom_line(size = 1, alpha = 0.7, aes_string(group = "sid", color = group)) +
+    ggtitle(title) +
+    labs(y = "log(Elastase)", x = "", color = "Class") +
+    scale_color_manual(values = palette) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust=0.5, size=11))
+  return(plot)
+}
+
+data.plot <- data.latent.all_times %>% filter(sid %in% sid_highProb)
+
+# Plot for each latent class count
+lcmm.ng2 <- plot.latent.spaghetti(data.plot, 2, "ng2", "2LC; Diagonal")
+lcmm.ng2_unstr <- plot.latent.spaghetti(data.plot, 2, "ng2_unstr", "2LC; Unstructured")
+lcmm.ng3 <- plot.latent.spaghetti(data.plot, 3, "ng3", "3LC; Diagonal")
+lcmm.ng3_unstr <- plot.latent.spaghetti(data.plot, 3, "ng3_unstr", "3LC; Unstructured")
+lcmm.ng4 <- plot.latent.spaghetti(data.plot, 4, "ng4", "4LC; Diagonal")
+lcmm.ng4_unstr <- plot.latent.spaghetti(data.plot, 4, "ng4_unstr", "4LC; Unstructured")
+lcmm.ng5 <- plot.latent.spaghetti(data.plot, 5, "ng5", "5LC; Diagonal")
+lcmm.ng5_unstr <- plot.latent.spaghetti(data.plot, 5, "ng5_unstr", "5LC; Unstructured")
+
+# Plot together
+latent_fig.ng2 <- ggarrange(lcmm.ng2, lcmm.ng2_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng3 <- ggarrange(lcmm.ng3, lcmm.ng3_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng4 <- ggarrange(lcmm.ng4, lcmm.ng4_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng5 <- ggarrange(lcmm.ng5, lcmm.ng5_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+ggarrange(latent_fig.ng2, latent_fig.ng3, latent_fig.ng4, latent_fig.ng5, ncol = 1)
+```
+
+```{r}
+intercept <- c("0.772", "0.000", "0.000")
+timeDischarge <- c("", "0.165", "0.000")
+timeFollowUp <- c("", "", "0.632")
+data.frame("intercept" = intercept, "timeDischarge" = timeDischarge, "timeFollowUp" = timeFollowUp) %>%
+  set_rownames(c("intercept", "timeDischarge", "timeFollowUp")) %>%
+  knitr::kable(caption = "Variance-covariance matrix of the random effects in the LCMM",
+    booktabs = T, align = "ccccc") %>%
+  kableExtra::kable_styling(latex_options = "hold_position")
+```
+
+```{r, fig.cap = "Distribution of CF pathogens at baseline for each latent class in final model"}
+data.modeling %>% 
+  dplyr::select(LC, "pseudo_aer.seq", "staph_aur.seq", "achromobacter.seq", "hflu.seq", "smalto.seq", "burk.seq") %>%
+  pivot_longer(cols = c(pseudo_aer.seq:burk.seq), names_to = "Taxa", values_to = "CLR_Transform") %>%
+  mutate(Taxa = case_when(
+    Taxa == "pseudo_aer.seq" ~ "Pseudomonas aerguinosa",
+    Taxa == "staph_aur.seq" ~ "Staphylococcus aureus",
+    Taxa == "achromobacter.seq" ~ "Achromobacter",
+    Taxa == "hflu.seq" ~ "Haemophilus",
+    Taxa == "smalto.seq" ~ "Stenotrophomonas",
+    Taxa == "burk.seq" ~ "Burkholderia"
+  )) %>%
+  ggplot(aes(x = LC, y = CLR_Transform)) +
+    geom_boxplot(aes(color = LC), fill = "white") +
+    scale_color_manual(values = c("steelblue1", "goldenrod2", "red", "springgreen3")) +
+    facet_wrap(~Taxa) +
+    labs(x = "Latent Class", y = "16S CLR Transform") +
+    theme_bw() +
+    theme(axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          legend.position = "bottom")
+```

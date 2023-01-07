@@ -1,0 +1,379 @@
+---
+title: |
+ | \vspace{-1cm} Exploring Longitudinal Pulmonary Exacerbation Outcome Trajectories in Cystic Fibrosis Patients
+author: |
+ | \vspace{-0.75cm} Brenton Graham \vspace{-0.75cm}
+date: |
+ | `r format(Sys.Date(), '%m/%d/%Y')`
+geometry: margin=1in
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document
+fontsize: 12pt
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+require(tidyverse)
+require(ggpubr)
+require(naniar)
+require(table1)
+require(lcmm)
+require(magrittr)
+require(scales)
+require(nnet)
+```
+
+```{r}
+# Import and factor data
+data <- read_delim("883LongitudinalData.csv", delim=",") %>%
+  mutate(time = factor(time, levels = c(1, 2, 3), labels = c("Admission", "Discharge", "Follow-Up")),
+         gender = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+         genotype = factor(genotype, levels = c(0:2), labels = c("0 F508del", "1 F508del", "2 F508del")),
+         admit.cf_pathogens = factor(admit.cf_pathogens),
+         admit.coinfect = factor(admit.coinfect),
+         hosp_pastyr = case_when(
+           hosp_pastyr == 0 ~ "0",
+           hosp_pastyr == 1 ~ "1",
+           hosp_pastyr > 1 ~ "2+"
+         ), hosp_pastyr = factor(hosp_pastyr, levels = c("0", "1", "2+")),
+         log_crp = log(crp),
+         log_elastase = log(elastase)) %>%
+  dplyr::select(-pe_pastyr) %>%
+  unite("ID", sid:time, sep = "_", remove = FALSE) %>%
+  column_to_rownames("ID")
+
+# Output SAS data
+#sas_data <- data
+#sas_data$log_elastase[which(is.na(sas_data$log_elastase))] <- "."
+#sas_data %>% write.table(file = "883LongitudinalData_SAS.csv", row.names = FALSE, sep = ",")
+```
+
+# Introduction
+Pulmonary exacerbations (PEx) are a leading cause of morbidity in cystic fibrosis (CF). Treatment response, which can be assessed through a variety of clinical markers, is often suboptimal despite seemingly appropriate antimicrobial therapy and can be quite variable among patients. In this study, CF patients were evaluated at three time points over the course of a PEx in order to assess treatment effectiveness. Time points include admission, hospital discharge and a follow-up clinic visit. PEx-related outcomes were measured at each time point, including lung function, PEx scores, and inflammation markers. Using elastase, an inflammation marker, as a biological proxy for treatment response, we first cluster patients into treatment response trajectory groups with a latent class mixed model approach. We then aim to identify potential baseline predictors of treatment response trajectory using the latent classes assigned by the model.
+
+Description of elastase and relationship to CF/PEx
+
+# Methods
+## The Data
+Data from 34 CF patients and 39 PEx are present in this data set (i.e., five subjects were evaluated over the course of two separate exacerbations). For each PEx there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days. All 39 PEx observations are treated independently throughout the study. The outcome of interest in this study, elastase, was log-transformed to handle skewness and more closely approximate a Guassian distribution.
+
+## Exploratory Data Analysis
+Summary statistics and data visualizations were used to explore clinical outcomes over time. Data visualizations of log-transformed elastase are shown in Figure 1. Figure 1A shows the distribution of the outcome stratified by time point within a PEx. Figure 1B shows subject-level change in the outcome over the course of a PEx. We expect log-transformed elastase levels to improve (i.e., decrease) from admission to discharge considering patients have been treated with antimicrobial therapy between these time points. 
+
+```{r, out.width = '100%', fig.cap = "Data visualizations of log-transformed elastase"}
+fig1 <- paste("elastase_plots.png", sep = "")
+knitr::include_graphics(fig1)
+```
+
+# Statistical Analysis
+There aren't necessarily any obvious grouping variables in this data set (i.e., there aren't treatment groups for which we'd like to compare). However, we are interested in the trajectory of our outcomes and it would be biologically interesting to assess if certain factors are associated with distinct outcome trajectories. To accomplish this we can use a latent class mixture model to cluster subjects into latent classes based on outcome trajectories. Once classes are assigned, we can use post-hoc analysis methods to characterize risk factor profiles that might be driving the trajectory differences. Baseline clinical markers will be used in this latent class-separation analysis. This will allow us to determine if there are any baseline indicators of treatment response trajectory.  
+
+## Latent Class Mixed Modeling
+In the first step of the analysis we will fit a latent class mixed model. Based on discussions with investigators, the elastase marker might make for the most biologically interesting latent class results. It will be most practical and appropriate to treat time as a class variable for the following reasons. First, there are only three time points, so we do not need to be concerned about the number of parameters we incorporate in the model. Second, modeling time as a class variable allows for the most flexibility. From the spaghetti plots it is obvious that the effect of time on the outcomes is not linear; quadratic relationships likely exists between time and the outcomes. Modeling time as a class variable will allow us to account for this.  
+
+Looking at the data structure, we should account for within-subject correlation. We can also consider including a random effect for the time variable since each time point relates to different outcome expectations (i.e., at time point 1 the subject is experiencing an exacerbation; at time point 2 the subject is on antibiotics and symptoms/outcomes are expected to improve). In other words, there should be some between-subject correlation at each time point. This is something that I'm not entirely confident in, however, and need to spend more time thinking about.    
+
+## Latent Class Model Selection
+This method requires users to specify the number of latent classes that should be created. As such, there is a model selection step. Below are results from models using 1-5 latent classes. Standard information criteria can be used to select the optimal number of latent classes.  
+```{r}
+# Latent class mixed modeling
+set.seed(8008) # Set seed for reproducibility
+
+# Base model with one latent class
+m1 <- hlme(
+  log_elastase ~ time, random = ~1 + time, subject = 'sid', data = data, 
+  ng = 1, idiag = T, verbose = F)
+
+# Unstructured variance-covariance structure
+m1.unstr <- hlme(
+  log_elastase ~ time, random = ~1 + time, subject = 'sid',
+  data = data, ng = 1, idiag = F, verbose = F)
+
+# Fit a variety of models with 2-5 latent classes
+# 2 Latent Classes -------------------------------------------------------------
+m2 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 2, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m2.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 2, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 3 Latent Classes -------------------------------------------------------------
+m3 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 3, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m3.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 3, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 4 Latent Classes -------------------------------------------------------------
+m4 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 4, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m4.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 4, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+
+# 5 Latent Classes -------------------------------------------------------------
+m5 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 5, idiag = T, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Unstructured variance-covariance structure
+m5.unstr <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 5, idiag = F, data = data, verbose = F), rep = 50, maxiter = 10, minit = m1.unstr)
+```
+
+```{r}
+# Re-order classes to make sense of triage
+m2 <- permut(m2, order = c(2, 1))
+m3 <- permut(m3, order = c(1, 3, 2))
+m3.unstr <- permut(m3.unstr, order = c(2, 3, 1))
+m4 <- permut(m4, order = c(4, 3, 2, 1))
+m4.unstr <- permut(m4.unstr, order = c(3, 4, 2, 1))
+m5 <- permut(m5, order = c(1, 2, 5, 4, 3))
+m5.unstr <- permut(m5.unstr, order = c(2, 1, 3, 4, 5))
+
+# Model comparison
+summarytable(
+  m2, m2.unstr, m3, m3.unstr, m4, m4.unstr, m5, m5.unstr,
+  which = c("G", "AIC", "SABIC", "%class"), display = F) %>%
+  as.data.frame() %>%
+  round(1) %>%
+  replace(is.na(.), "") %>%
+  set_colnames(c("Latent Classes", "AIC", "Adjusted BIC", 
+                 "Class1", "Class2", "Class3", "Class4", "Class5")) %>%
+  #set_rownames(NULL) %>%
+  mutate(Class1 = ifelse(Class1 == "", "", paste(Class1, "%", sep = "")),
+         Class2 = ifelse(Class2 == "", "", paste(Class2, "%", sep = "")),
+         Class3 = ifelse(Class3 == "", "", paste(Class3, "%", sep = "")),
+         Class4 = ifelse(Class4 == "", "", paste(Class4, "%", sep = "")),
+         Class5 = ifelse(Class5 == "", "", paste(Class5, "%", sep = ""))) %>%
+  knitr::kable(
+    caption = "Model comparison of latent class mixed-models fit with different numbers of latent classes",
+    booktabs = T, align = "ccccc")
+```
+
+```{r}
+# Merge SID latent class assignments
+latent_classes <- m2$pprob[, 1:2] %>%
+  merge(m2.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m3$pprob[, 1:2], by = "sid") %>%
+  merge(m3.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m4$pprob[, 1:2], by = "sid") %>%
+  merge(m4.unstr$pprob[, 1:2], by = "sid") %>%
+  merge(m5$pprob[, 1:2], by = "sid") %>%
+  merge(m5.unstr$pprob[, 1:2], by = "sid") %>%
+  set_colnames(c("sid", "ng2", "ng2_unstr", "ng3", "ng3_unstr", "ng4", "ng4_unstr", "ng5", "ng5_unstr"))
+
+# Merge to full data frame
+data.latent_incl <- data %>%
+  merge(latent_classes, by = "sid", all.x = T) %>%
+  mutate(ng2 = factor(ng2), ng3 = factor(ng3), ng4 = factor(ng4), ng5 = factor(ng5),
+         ng2_unstr = factor(ng2_unstr), ng3_unstr = factor(ng3_unstr), 
+         ng4_unstr = factor(ng4_unstr), ng5_unstr = factor(ng5_unstr))
+```
+
+
+## Latent Class Visualization
+Below we can see how these clusters look based on number of clusters and outcome trajectory.
+```{r, fig.dim=c(8, 12)}
+# Function to plot spaghetti plots of outcomes over time colored by latent class
+plot.latent.spaghetti <- function(data, ng, group, title) {
+  palette <- c("red", "steelblue1", "goldenrod2", "springgreen3", "grey20")[1:ng]
+  plot <- data %>%
+    ggplot(aes_string(x = "time", y = "log_elastase")) +
+    geom_point(aes_string(color = group), size = 0.8) +
+    geom_smooth(aes_string(color = group)) +
+    geom_line(size = 1, alpha = 0.7, aes_string(group = "sid", color = group)) +
+    ggtitle(title) +
+    labs(y = "log(Elastase)", x = "", color = "Class") +
+    scale_color_manual(values = palette) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust=0.5, size=11))
+  return(plot)
+}
+
+# Plot for each latent class count
+lcmm.ng2 <- plot.latent.spaghetti(data.latent_incl, 2, "ng2", "2LC")
+lcmm.ng2_unstr <- plot.latent.spaghetti(data.latent_incl, 2, "ng2_unstr", "2LC; Unstructured")
+lcmm.ng3 <- plot.latent.spaghetti(data.latent_incl, 3, "ng3", "3LC")
+lcmm.ng3_unstr <- plot.latent.spaghetti(data.latent_incl, 3, "ng3_unstr", "3LC; Unstructured")
+lcmm.ng4 <- plot.latent.spaghetti(data.latent_incl, 4, "ng4", "4LC")
+lcmm.ng4_unstr <- plot.latent.spaghetti(data.latent_incl, 4, "ng4_unstr", "4LC; Unstructured")
+lcmm.ng5 <- plot.latent.spaghetti(data.latent_incl, 5, "ng5", "5LC")
+lcmm.ng5_unstr <- plot.latent.spaghetti(data.latent_incl, 5, "ng5_unstr", "5LC; Unstructured")
+
+# Plot together
+latent_fig.ng2 <- ggarrange(lcmm.ng2, lcmm.ng2_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng3 <- ggarrange(lcmm.ng3, lcmm.ng3_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng4 <- ggarrange(lcmm.ng4, lcmm.ng4_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+latent_fig.ng5 <- ggarrange(lcmm.ng5, lcmm.ng5_unstr, ncol=2, nrow=1, common.legend = T, legend = "right")
+ggarrange(latent_fig.ng2, latent_fig.ng3, latent_fig.ng4, latent_fig.ng5, ncol = 1)
+```
+
+```{r, fig.dim=c(8, 3)}
+traj_data <- data.frame(time = c("Admission", "Discharge", "Follow-Up"))
+traj_pred <- predictY(m4, traj_data, var.time ="time", draws = TRUE)
+traj_pred$times = c(1, 2, 3)
+
+traj_pred$pred %>% as.data.frame() %>%
+  mutate(time = c("Admission", "Discharge", "Follow-Up")) %>%
+  pivot_longer(cols = c(Ypred_class1:upper.Ypred_class4)) %>%
+  separate("name", into = c("linetype", "class"), sep = "_") %>%
+  mutate(
+    class = case_when(
+      class == "class1" ~ "1",
+      class == "class2" ~ "2",
+      class == "class3" ~ "3",
+      class == "class4" ~ "4"),
+    time = case_when(
+      time == "Admission" ~ 1,
+      time == "Discharge" ~ 2,
+      time == "Follow-Up" ~ 3)
+    ) %>%
+  ggplot(aes(x = time, y = value, color = class, linetype = linetype, size = linetype)) +
+    geom_smooth() +
+    labs(y = "log(Elastase)", x = "Time", color = "Class") +
+    scale_color_manual(values = c("red", "steelblue1", "goldenrod2", "springgreen3")) +
+    scale_linetype_manual(values = c(5, 5, 1)) +
+    scale_size_manual(values = c(0.3, 0.3, 1.8)) +
+    scale_x_continuous(limits = c(0.8, 3.2), breaks = c(1, 2, 3)) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank())
+```
+
+# Results
+```{r}
+data %>%
+  filter(time == "Admission") %>%
+  table1(~gender + age + bmi + genotype, caption = "Table 1. Demographics of study population.", data = .)
+```
+
+```{r}
+#summary(m4)
+```
+
+```{r}
+#m4$pprob %>%
+#  arrange(class, sid) %>%
+#  round(3)
+```
+
+```{r}
+# seq_data <- data.latent_incl %>% filter(time == "Admission") %>% dplyr::select(contains("seq"))
+# rel_ab <- seq_data / data.latent_incl$total_reads
+# 
+# # Filter baseline data and desired covariates for nominal regression models
+# data.modeling <- data.latent_incl %>% filter(time == "Admission") %>%
+#   dplyr::select(gender, genotype, age, bmi, admit.virus, admit.cf_pathogens, 
+#                 latent_class = ng4,contains("seq"), contains("cult")) %>%
+#   mutate(latent_class.bin = case_when(
+#     latent_class %in% c(2, 3) ~ 1,
+#     latent_class %in% c(1, 4) ~ 0,
+#   ))
+# 
+# # Fit model
+# model <- glm(latent_class.bin ~ gender + genotype + age + bmi + admit.virus, 
+#              data = data.modeling, family = "binomial")
+# model %>% broom::tidy(exp = TRUE, conf.int = TRUE) %>%
+#   select(term, estimate, conf.low, conf.high, p.value) %>%
+#   column_to_rownames("term") %>%
+#   round(3)
+```
+
+```{r}
+data.latent_incl %>% 
+  filter(ng4 %in% c(3, 4)) %>%
+  ggplot(aes_string(x = "time", y = "log_elastase")) +
+    geom_point(size = 0.8) +
+    geom_line(size = 1, alpha = 0.7, aes_string(group = "sid")) +
+    ggtitle("Groups 3 and 4 together")
+```
+
+```{r}
+data.latent_incl %>% 
+  filter(ng4 %in% c(1, 2)) %>%
+  ggplot(aes_string(x = "time", y = "log_elastase")) +
+    geom_point(size = 0.8) +
+    geom_line(size = 1, alpha = 0.7, aes_string(group = "sid")) +
+    ggtitle("Groups 1 and 2 together")
+```
+
+```{r}
+data.latent_incl %>% 
+  #filter(ng4 %in% c(3, 4)) %>%
+  ggplot(aes_string(x = "time", y = "log_elastase")) +
+    geom_point(size = 0.8) +
+    geom_line(size = 1, alpha = 0.7, aes_string(group = "sid")) +
+    ggtitle("Groups 3 and 4 together")
+```
+
+
+# "Structure" Model
+```{r}
+summary(m4)
+```
+
+# "Unstructure" Model
+```{r}
+summary(m4.unstr)
+```
+
+```{r}
+data.modeling <- data.latent_incl %>% filter(time == "Admission") %>%
+  dplyr::select(gender, genotype, age, bmi, admit.virus, admit.cf_pathogens, latent_class = ng4) %>%
+  mutate(latent_class.bin = case_when(
+    latent_class %in% c(1, 2) ~ 0,
+    latent_class %in% c(3, 4) ~ 1), latent_class.bin = factor(latent_class.bin))
+```
+
+```{r}
+model <- glm(latent_class.bin ~ gender + genotype + age + bmi + admit.virus, 
+             data = data.modeling, family = "binomial")
+
+broom::tidy(model, exponentiate = T) %>%
+  column_to_rownames("term") %>%
+  round(3)
+```
+
+```{r}
+data.high.modeling <- data.latent_incl %>% filter(time == "Admission") %>%
+  dplyr::select(gender, genotype, age, bmi, admit.virus, admit.cf_pathogens, latent_class = ng4) %>%
+  filter(latent_class %in% c(2, 3)) %>%
+  mutate(latent_class.bin = case_when(
+    latent_class == 2 ~ 1,
+    latent_class == 3 ~ 0), latent_class.bin = factor(latent_class.bin))
+
+model.high <- glm(latent_class.bin ~ gender + genotype + age + bmi + admit.virus, 
+                  data = data.high.modeling, family = "binomial")
+
+summary(model.high)
+```
+
+```{r}
+data.low.modeling <- data.latent_incl %>% filter(time == "Admission") %>%
+  dplyr::select(gender, genotype, age, bmi, admit.virus, admit.cf_pathogens, latent_class = ng4) %>%
+  filter(latent_class %in% c(1, 4)) %>%
+  mutate(latent_class.bin = case_when(
+    latent_class == 1 ~ 1,
+    latent_class == 4 ~ 0), latent_class.bin = factor(latent_class.bin))
+
+model.low <- glm(latent_class.bin ~ gender + genotype + age + bmi + admit.virus, 
+                 data = data.low.modeling, family = "binomial")
+
+summary(model.low)
+```
+
+
+

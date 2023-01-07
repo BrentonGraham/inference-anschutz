@@ -1,0 +1,335 @@
+---
+title: 'Longitudinal Project Update: EDA'
+author: "Brenton Graham"
+date: '2022-11-04'
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+require(tidyverse)
+require(gridExtra)
+require(naniar)
+```
+
+## Background
+Pulmonary exacerbations (PEx) are a leading cause of morbidity in cystic fibrosis (CF). Treatment response is often suboptimal despite seemingly appropriate antimicrobial therapy. In this study, we seek to determine changes in airway microbiome and clinical response with onset and treatment of a PEx in children and adolescents with CF. Participants hospitalized for PEx were evaluated at admission, hospital discharge and a follow-up clinic visit. Sputum and blood samples were collected along with lung function and PEx score. Quantitative CF cultures were performed. Sputum and plasma were analyzed for inflammatory and protein markers.
+
+## Data
+```{r}
+data <- read_delim("883LongitudinalData.csv", delim=",") %>%
+  mutate(time = factor(time, levels = c(1, 2, 3), labels = c("T1", "T2", "T3"))) %>%
+  mutate(admit.cf_pathogens = factor(case_when(
+    admit.cf_pathogens <= 1 ~ "0-1 CF Pathogens",
+    admit.cf_pathogens > 1 ~ "2+ CF Pathogens",
+  ))) %>%
+  unite("ID", sid:time, sep = "_", remove = FALSE) %>%
+  column_to_rownames("ID")
+```
+
+### Subjects & Repeated Measures
+Data from 21 unique subjects and 23 pulmonary exacerbations are present in this data set (i.e., two subjects had exacerbations on two separate occasions). For each exacerbation there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days.  
+
+### Variable Description
+#### Outcomes
+We're interested in modeling several response outcomes over time, including the following.
+
+- fev1_pred: FEV1, a measure of lung function (the higher the better) 
+- pes_total: PEx score (the lower the better) 
+- crp: C-reactive protein, a measure of inflammation (the lower the better)  
+- elastase: An enzyme marker
+- We could possibly be interested in modeling 16S taxa counts 
+
+```{r}
+# FEV-1
+fev1_dist <- data %>%
+  ggplot(aes(x = fev1_pred)) +
+  geom_density(aes(color = time), alpha = 0.6) +
+  ggtitle("FEV1") +
+  labs(x = "") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust=0.5, size=11),
+        legend.key.size = unit(.3, 'cm'),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom")
+
+# PEx Score
+pex_dist <- data %>%
+  ggplot(aes(x = pes_total)) +
+  geom_density(aes(color = time), alpha = 0.6) +
+  ggtitle("PEx Score") +
+  labs(x = "") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust=0.5, size=11),
+        legend.key.size = unit(.3, 'cm'),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom")
+
+# CRP
+crp_dist <- data %>%
+  ggplot(aes(x = log(crp))) +
+  geom_density(aes(color = time), alpha = 0.6) +
+  ggtitle("log(CRP)") +
+  labs(x = "") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust=0.5, size=11),
+        legend.key.size = unit(.3, 'cm'),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom")
+
+# Elastase
+elastase_dist <- data %>%
+  ggplot(aes(x = log(elastase))) +
+  geom_density(aes(color = time), alpha = 0.6) +
+  ggtitle("log(Elastase)") +
+  labs(x = "") +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank(),
+        plot.title = element_text(hjust=0.5, size=11),
+        legend.key.size = unit(.3, 'cm'),
+        legend.text = element_text(size = 8),
+        legend.position = "bottom")
+
+
+# Plot together
+dist_fig <- grid.arrange(fev1_dist, pex_dist, crp_dist, elastase_dist, ncol=2)
+```
+
+```{r}
+# FEV-1
+spag.fev1 <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = fev1_pred)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# PEx Score
+spag.pex <-data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = pes_total)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# CRP
+spag.crp <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = crp)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Elastase
+spag.elastase <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = elastase)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Plot together
+pathogens_fig <- grid.arrange(spag.fev1, spag.pex, spag.crp, spag.elastase, ncol=2)
+```
+
+#### Explanatory Variables
+In this data set we have a collection of interesting explanatory variables. These include important CF pathogen measures (from both culture and 16S rRNA sequencing) and viral measures at admission. Well known CF pathogens include Pseudomonas aeruginosa, Staphylococcus aureus, Haemophilus influenzae, Stenotrophomonas maltophilia, Achromobacter xylosoxidans and Burkholderia cepacia.  
+
+In general, we'd like to get a sense of whether or not there is anything at admission that can be used to predict the subject's response to treatment. To simplify things, we will test two primary explanatory variables: 
+
+1. **Number of CF pathogens detected at admission.** This is the sum of binary detection results from culture. There are some studies suggesting that increased CF pathogens has negative impacts on treatment response.    
+
+```{r}
+# FEV-1
+pathogens.fev1 <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = fev1_pred)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.cf_pathogens) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# PEx Score
+pathogens.pex <-data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = pes_total)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.cf_pathogens) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# CRP
+pathogens.crp <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = crp)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.cf_pathogens) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Elastase
+pathogens.elastase <- data %>%
+  drop_na(admit.cf_pathogens) %>%
+  ggplot(aes(x = time, y = elastase)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.cf_pathogens) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Plot together
+pathogens_fig <- grid.arrange(pathogens.fev1, pathogens.pex, pathogens.crp, pathogens.elastase, ncol=2)
+```
+
+2. **Bacterial/Viral co-infection at admission.** This is a binary variable that indicates whether or not **both** CF and viral pathogens were detected when the subject was admitted.  
+
+```{r}
+# FEV-1
+coinf.fev1 <- data %>%
+  drop_na(admit.coinfect) %>%
+  mutate(admit.coinfect = factor(admit.coinfect, levels = c(0, 1), labels = c("No Co-Infection", "Co-Infection"))) %>%
+  ggplot(aes(x = time, y = fev1_pred)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.coinfect) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# PEx Score
+coinf.pex <-data %>%
+  drop_na(admit.coinfect) %>%
+  mutate(admit.coinfect = factor(admit.coinfect, levels = c(0, 1), labels = c("No Co-Infection", "Co-Infection"))) %>%
+  ggplot(aes(x = time, y = pes_total)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.coinfect) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# CRP
+coinf.crp <- data %>%
+  drop_na(admit.coinfect) %>%
+  mutate(admit.coinfect = factor(admit.coinfect, levels = c(0, 1), labels = c("No Co-Infection", "Co-Infection"))) %>%
+  ggplot(aes(x = time, y = crp)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.coinfect) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Elastase
+coinf.elastase <- data %>%
+  drop_na(admit.coinfect) %>%
+  mutate(admit.coinfect = factor(admit.coinfect, levels = c(0, 1), labels = c("No Co-Infection", "Co-Infection"))) %>%
+  ggplot(aes(x = time, y = elastase)) +
+  geom_point(size = 0.5) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~admit.coinfect) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+# Plot together
+coinf_fig <- grid.arrange(coinf.fev1, coinf.pex, coinf.crp, coinf.elastase, ncol=2)
+```
+
+#### Precision Variables
+The following variables will be included as covariates in all models.
+
+- Gender  
+- Age  
+- Genotype: There is a specific gene of interest in CF patients. This variable indicates the genotype of the patient (e.g. 0: 0 alleles, 1: 1 allele, 2: 2 alleles).  
+
+### Missing Data in Our Outcomes
+There are some missing data in our outcome variables (shown below).  
+```{r}
+# Visualize missingness
+data %>% vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+## Interesting/Messy Things in the Data Set
+
+- Some patients are included twice, and we probably shouldn't treat separate exacerbations for the same subject as independent. We will need to figure out a way to account for this.  
+- As mentioned, there are missing values in all of our outcomes of interest.  
+- We don't expect there to be strong correlation between time points 1 and 2 and time points 2 and 3. This is because the patients have received treatment at time point 2. Since there is no obvious pattern in correlation we might want to use an unstructured covariance matrix.  
+
+## Looking at Relative Abundance Over Time
+```{r}
+seq_data <- data %>% select(contains("seq"))
+rel_ab <- seq_data / data$total_reads
+rel_ab.wide <- rel_ab %>%
+  merge(data %>% select(sid, time, sid_first, gender, genotype, age, admit.coinfect, admit.cf_pathogens), by = "row.names") %>%
+  column_to_rownames("Row.names")
+rel_ab.long <- rel_ab.wide %>%
+  pivot_longer(cols = contains("seq"), names_to = "taxa", values_to = "rel_ab", names_pattern = "(.*).seq")
+
+rel_ab.long %>%
+  ggplot(aes(x = time, y = log(rel_ab), color = taxa)) +
+  geom_point(size = 0.1) +
+  geom_smooth() +
+  geom_line(alpha = 0.6, aes(group = sid)) +
+  facet_wrap(~taxa) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+
+rel_ab.long %>%
+  ggplot(aes(x = log(rel_ab), color = time)) +
+  geom_density() +
+  facet_wrap(~taxa) +
+  theme_bw() +
+  theme(panel.grid.minor = element_blank())
+```
+
+# Multivariate Mixed Model
+
+```{r}
+require(JMbayes)
+
+# Clincal responses
+MixedModelFit <- mvglmer(list(fev1_pred ~ time + (time | sid) + admit.cf_pathogens,
+                              log(crp) ~ time + (time | sid) + admit.cf_pathogens,
+                              log(elastase) ~ time + (time | sid) + admit.cf_pathogens),
+                         data = data, families = list(gaussian, gaussian, gaussian))
+
+summary(MixedModelFit)
+```
+
+```{r}
+MixedModelFit <- mvglmer(list(log(hflu.seq) ~ time + (time | sid),
+                              log(pseudo_aer.seq) ~ time + (time | sid)),
+                         data = rel_ab.wide, families = list(gaussian, gaussian))
+```
+
+
+
+
+
+
+

@@ -1,0 +1,401 @@
+---
+title: 'Project 0: Bios6624'
+author: |
+ | Analyst: Brenton Graham
+ |
+ | Report generated: `r format(Sys.Date(), '%m/%d/%Y')`
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document: default
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+library(tidyverse)
+library(readr)
+library(naniar)
+library(mice)
+library(gridExtra)
+library(reshape2)
+library(tableone)
+library(boot)
+```
+
+```{r, include=FALSE}
+# Import data and select relevant features
+data <- paste(getwd(), "Project0_dental_data.csv", sep = "/") %>% 
+  read_delim(delim = ",") %>%
+  # Factor encoded groups
+  mutate(
+    trtgroup = factor(
+      trtgroup, 
+      levels = c(2, 1, 3, 4, 5), # Choosing "Control" group as the reference
+      labels = c("Control", "Placebo", "Low", "Medium", "High")
+      ),
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female")),
+    race = factor(
+      race,
+      levels = c(5, 4, 2, 1),
+      labels = c("White", "Asian", "African American", "Native American")
+    ),
+    smoker = factor(smoker, levels = c(0, 1), labels = c("Non-smoker", "Smoker"))
+  )
+```
+
+# Introduction
+
+Dental researchers are interested in assessing the effectiveness of a new gum disease treatment. The study involves 130 subjects from a single Midwestern dental clinic who were asked to administer the treatment twice per day. Subjects were randomized into five treatment groups: placebo, control, low-dosage, medium-dosage, and high-dosage. Two primary outcomes, whole-mouth average pocket depth and whole-mouth average attachment loss, were measured in each subject to assess treatment effectiveness. Each outcome was measured at baseline and 1 year after the baseline visit.  
+
+The purpose of this report is to answer the following hypotheses of interest:  
+
+*Hypothesis 1: Average pocket depth is significantly lowered by treatment at one year.*  
+<br>
+*Hypothesis 2: Attachment loss is significantly lowered by treatment at one year.*  
+
+<br>
+<br>
+
+# Methods
+
+## Data Transformation
+
+The original data set provided by the researchers included separate columns for baseline and 1-year measurements of each outcome variable, average pocket depth (PD) and attachment loss (AL). The difference between 1-year and baseline measurement was calculated for each outcome to represent the change in outcome between time points. Further analyses use these calculated differences as the two primary outcome measurements.  
+
+<br>
+
+## Exploratory Data Analysis
+
+Prior to cleaning and model fitting, visualizations and summary statistics were used to explore outcomes and relationships to independent variables. Distributions of the primary outcomes are shown in Figure 1. Each outcome approximates a normal distribution, although the distribution of the AL outcome appears to be left-skewed. Relationships between the outcome variables and treatment groups were visualized on both a subject-level and group-level to gauge expectations with regards to model results (Figures 3 and 4). Potential outlier values were observed for each raw outcome variable. However, subject-level plots show that subjects with outlier outcomes produced outlier measurements for both the baseline and 1-year time points. These values were therefore included in downstream analysis.  
+
+```{r, dist_fig, echo=FALSE, fig.dim=c(6, 3), fig.cap="Distribution of outcome variables."}
+# Visualize distribution of outcome variables
+# Pocket depth histogram
+hist.pd_change <- data %>%
+  ggplot(aes(x = pd1year - pdbase)) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    ggtitle("Pocket Depth Change") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# Attachment histogram
+hist.att_change <- data %>%
+  ggplot(aes(x = attach1year - attachbase)) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    ggtitle("Attachment Loss Change") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# Pocket depth denisty
+dens.pd_change <- data %>%
+  ggplot(aes(x = pd1year - pdbase)) +
+    geom_density(aes(color = trtgroup), alpha = 0.6) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# Pocket depth denisty
+dens.att_change <- data %>%
+  ggplot(aes(x = attach1year - attachbase)) +
+    geom_density(aes(color = trtgroup), alpha = 0.6) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# Plot together
+dist_fig <- grid.arrange(hist.pd_change, hist.att_change, dens.pd_change, dens.att_change, ncol=2)
+```
+
+<br>
+\newpage
+
+## Missing Data
+
+Exploration of missing data revealed that 27 subjects were missing follow-up measurements for both outcome variables (20.8%), one subject was missing data for age, and one subject was missing data for smoking status (Figure 2). A hypothesis test (Little's test) was performed to test whether or not the data were missing completely at random. Results from the test suggest that missing entries were not missing completely at random ($p <0.01$). Correspondingly, multiple imputation by chained equation (MICE) was performed for the follow-up outcome columns. Model results for each outcome include pooled estimates from five imputed data sets. Separate data sets were imputed for each outcome variable in the absence of the alternative outcome. For example, attachment loss measurements were removed before imputing missing pocket depth entries. Values were not imputed for missing predictor variables; these two observations were omitted from further analysis including model fitting. Diagnostic plots were generated to ensure all imputed values were plausible and fit into the present value distributions (Figures 5 and 6). Missing outcome data is twice as prevalent for men as it is women as shown in Table 6 (18 men vs. 9 women).  
+
+```{r, echo=FALSE, fig.dim=c(6, 2.5), fig.cap="Missing data visualization."}
+# Visualize missingness
+data %>% vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+```{r, include=FALSE}
+# See pattern
+data %>% md.pattern(rotate.names = TRUE)
+```
+
+```{r, include = FALSE}
+# Test if missingness is MCAR or not - will impact missing value handling
+# The null hypothesis here is that the missing data are MCAR; p < 0.01 suggests
+# that the missing entries are not MCAR
+data %>% mcar_test()
+```
+<br>
+<br>
+
+## Modeling
+Multiple linear regression models were fit for each outcome variable. Linear regression assume independence, linearity, homoscedasticity, and normality, which are checked in the modeling diagnostics section. Crude and adjusted models were both fit and estimates are provided for each. Independent variables were relatively well-balanced across treatment groups, with the exception of race (Table 1). White subjects dominate the population makeup. Given this information, these covariates were excluded from our models. Imbalanced missing data is, however, observed for sex as noted above. We will therefore adjust for sex in our adjusted models. R 4.1.1 software was used for all analysis.
+
+```{r, echo=FALSE}
+# Table 1 (source: https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html)
+vars <- data %>% select(-id, -trtgroup, -contains("attach"), -contains("pd")) %>% base::colnames()
+cat_vars <- c("sex", "race", "smoker")
+table1 <- CreateTableOne(vars = vars, factorVars = cat_vars, strata = "trtgroup", data = data)
+print(table1, print = F) %>% 
+  as.data.frame() %>% 
+  select(-test, -p) %>% 
+  knitr::kable(caption = "Study population description")
+```
+
+
+# Results
+
+```{r, include=FALSE}
+# Function returns imputed data sets contained in "mids" object (from mice package)
+impute <- function(data, m) {
+  
+  # Create map of which entries to impute; we should only impute outcomes, not predictors
+  where_df <- is.na(data)
+  where_df[, "age"] <- FALSE
+  where_df[, "smoker"] <- FALSE
+  
+  # Perform imputation
+  mult_imp <- data %>% mice(m = m, where = where_df, seed = 0, print = F)
+  return(mult_imp)
+}
+```
+
+## Whole-Mouth Average Pocket Depth
+Estimates from the crude and adjusted multiple linear regression models are reported in tables 2 and 3. Compared to the control reference group, no treatment group demonstrated a significant change in average pocket depth between year-1 and baseline measurements. Of all treatment types, the placebo group showed the largest reduction in average pocket depth.   
+
+```{r, echo=FALSE}
+# Impute data
+impute.pd <- data %>% 
+  column_to_rownames("id") %>% 
+  select(-contains("attach")) %>%
+  impute(m = 5)
+
+# Fit each imputed set and pool estimates
+# Source for confidence intervals: https://github.com/amices/mice/issues/92
+
+# Crude models
+crude_fit.pd <- with(impute.pd, glm(pd1year - pdbase ~ trtgroup))
+crude_fit.pooled.pd <- pool(crude_fit.pd)
+summary(crude_fit.pooled.pd, conf.int = TRUE) %>%
+  as.tibble() %>%
+  dplyr::rename(CI_lower = "2.5 %", CI_upper = "97.5 %") %>%
+  mutate("95% CI" = paste(round(CI_lower, 2), round(CI_upper, 2), sep = ", ")) %>%
+  dplyr::rename(Term = term, Estimate = estimate, "p-value" = p.value, StdError = std.error, TestStatistic = statistic) %>%
+  select("Term", "Estimate", "95% CI", "p-value", "StdError", "TestStatistic") %>%
+  knitr::kable(digits = 2, align = "ccccc", caption = "Pocket depth crude model estimates")
+```
+
+\newpage
+
+```{r, echo=F}
+# Adjusted models
+adj_fit.pd <- with(impute.pd, glm(pd1year - pdbase ~ trtgroup + pdbase + sex))
+adj_fit.pooled.pd <- pool(adj_fit.pd)
+summary(adj_fit.pooled.pd, conf.int = TRUE) %>%
+  as.tibble() %>%
+  dplyr::rename(CI_lower = "2.5 %", CI_upper = "97.5 %") %>%
+  mutate("95% CI" = paste(round(CI_lower, 2), round(CI_upper, 2), sep = ", ")) %>%
+  dplyr::rename(Term = term, Estimate = estimate, "p-value" = p.value, StdError = std.error, TestStatistic = statistic) %>%
+  select("Term", "Estimate", "95% CI", "p-value", "StdError", "TestStatistic") %>%
+  knitr::kable(digits = 2, align = "ccccc", caption = "Pocket depth adjusted model estimates")
+```
+
+
+## Whole-Mouth Average Attachment Loss
+Estimates from the crude and adjusted multiple linear regression models are reported in tables 4 and 5. According to the adjusted model, none of the treatment groups lower average attachment loss as compared to the reference control group; all treatment groups are associated with an increase in attachment loss when compared to the control group. In fact, a significant increase in attachment loss is observed for the medium-dosage treatment group (0.15 unit increase, CI 95%: 0, 0.3) as compared to the control group at a significance level of $\alpha = 0.05$ ($p = 0.04$).  
+
+```{r, echo=FALSE}
+# Impute data
+impute.att <- data %>% 
+  column_to_rownames("id") %>% 
+  select(-contains("pd")) %>%
+  impute(m = 5)
+
+# Fit each imputed set and pool estimates
+# Source for confidence intervals: https://github.com/amices/mice/issues/92
+
+# Crude models
+crude_fit.att <- with(impute.att, glm(attach1year - attachbase ~ trtgroup))
+crude_fit.pooled.att <- pool(crude_fit.att)
+summary(crude_fit.pooled.att, conf.int = TRUE) %>%
+  as.tibble() %>%
+  dplyr::rename(CI_lower = "2.5 %", CI_upper = "97.5 %") %>%
+  mutate("95% CI" = paste(round(CI_lower, 2), round(CI_upper, 2), sep = ", ")) %>%
+  dplyr::rename(Term = term, Estimate = estimate, "p-value" = p.value, StdError = std.error, TestStatistic = statistic) %>%
+  select("Term", "Estimate", "95% CI", "p-value", "StdError", "TestStatistic") %>%
+  knitr::kable(digits = 2, align = "ccccc", caption = "Attachment loss crude model estimates")
+
+# Adjusted models
+adj_fit.att <- with(impute.att, glm(attach1year - attachbase ~ trtgroup + attachbase + sex))
+adj_fit.pooled.att <- pool(adj_fit.att)
+summary(adj_fit.pooled.att, conf.int = TRUE) %>%
+  as.tibble() %>%
+  dplyr::rename(CI_lower = "2.5 %", CI_upper = "97.5 %") %>%
+  mutate("95% CI" = paste(round(CI_lower, 2), round(CI_upper, 2), sep = ", ")) %>%
+  dplyr::rename(Term = term, Estimate = estimate, "p-value" = p.value, StdError = std.error, TestStatistic = statistic) %>%
+  select("Term", "Estimate", "95% CI", "p-value", "StdError", "TestStatistic") %>%
+  knitr::kable(digits = 2, align = "ccccc", caption = "Attachment loss adjusted model estimates")
+```
+
+## Model Diagnostics
+
+Model assumptions were inspected visually with residual and Q-Q plots after adjusted models were fit (Figures 7 and 8). For each adjusted model, residuals are evenly scattered around zero with an approximate equal variance and display no obvious, troublesome pattern. Further, Q-Q plots of each model suggest normality. Overall, no linear regression model assumption is explicitly violated based on these visuals.
+
+<br>
+<br>
+
+\newpage
+
+# Discussion
+
+Results from this study indicate that the new gel treatment generally does not improve gum health over the course of one year, as measured by whole-mouth average pocket depth and whole-mouth average attachment loss. Rather, most treatments which involved use of the gel were associated with adverse effects (increased average pocket depth and increased attachment loss). A significant increase in attachment loss was even observed for the medium-dosage treatment group when compared to the control group. Limitations in this study might include the lack of diversity in cohort demographics and the large presence of subject dropout. Further studies involving a more well-balanced and unbiased data set might be beneficial in improving understanding around the effects of this gel treatment.  
+
+\newpage
+
+# Supplemental Figures
+
+## Spaghetti Plots
+```{r, echo=FALSE, fig.dim=c(6, 4), fig.cap="Spaghetti plots showing raw outcome measurements by treatment group at subject-level."}
+# Pocket depth
+trtgroup_violin.pd <- data %>%
+  select(id, trtgroup, pdbase, pd1year) %>%
+  dplyr::rename(baseline = pdbase, year1 = pd1year) %>%
+  mutate(id = factor(id)) %>%
+  melt(idvars = c(id, trtgroup), variable.name = "time", value.name = "pocket_depth") %>%
+  ggplot(aes(x = time, y = pocket_depth, fill = time)) +
+    geom_violin(color = "gray5", lwd = 0.6) +
+    facet_grid(cols=vars(trtgroup)) +
+    geom_boxplot(width = 0.1, fill = "white", color = "gray5") +
+    geom_line(aes(group = id), alpha = 0.5) +
+    scale_fill_manual(values = c("orange2", "lightsteelblue")) +
+    ggtitle("Pocket Depth Before/After Treatment by Treatment Group") +
+    labs(x = "Timepoint", y = "Average Pocket Depth") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=10),
+          axis.title = element_text(size=8),
+          axis.text = element_text(size=8),
+          legend.position = "none")
+
+# Attachment loss
+trtgroup_violin.att <- data %>%
+  select(id, trtgroup, attachbase, attach1year) %>%
+  dplyr::rename(baseline = attachbase, year1 = attach1year) %>%
+  mutate(id = factor(id)) %>%
+  melt(idvars = c(id, trtgroup), variable.name = "time", value.name = "attachment_loss") %>%
+  ggplot(aes(x = time, y = attachment_loss, fill = time)) +
+    geom_violin(color = "gray5", lwd = 0.6) +
+    facet_grid(cols=vars(trtgroup)) +
+    geom_boxplot(width = 0.1, fill = "white", color = "gray5") +
+    geom_line(aes(group = id), alpha = 0.5) +
+    scale_fill_manual(values = c("orange2", "lightsteelblue")) +
+    ggtitle("Whole Mouth Attachment Loss Before/After Treatment by Treatment Group") +
+    labs(x = "Timepoint", y = "Attachment Loss") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=10),
+          axis.title = element_text(size=8),
+          axis.text = element_text(size=8),
+          legend.position = "none")
+
+grid.arrange(trtgroup_violin.pd, trtgroup_violin.att, ncol=1)
+```
+
+## Violin Plots
+```{r, echo=FALSE, fig.dim=c(6, 2), fig.cap="Violin plots showing outcome changes by treatment group at group-level."}
+# Visualize distribution of outcome variables
+# Pocket depth violin plots
+violin.pd <- data %>%
+  ggplot(aes(x = trtgroup, pd1year - pdbase)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, fill = "white", color = "gray5") + 
+    ggtitle("Pocket Depth Change") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=10),
+          axis.title = element_text(size=8),
+          axis.text = element_text(size=8))
+
+# Attachment loss violin plots
+violin.att <- data %>%
+  ggplot(aes(x = trtgroup, attach1year - attachbase)) +
+    geom_violin() +
+    geom_boxplot(width = 0.1, fill = "white", color = "gray5") + 
+    ggtitle("Attachment Loss Change") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=10),
+          axis.title = element_text(size=8),
+          axis.text = element_text(size=8))
+
+# Plot together
+grid.arrange(violin.pd, violin.att, ncol = 2)
+```
+
+\newpage
+
+## Multiple Imputation Diagnostic Plots
+
+### Whole-Mouth Average Pocket Depth
+
+```{r, echo=FALSE, fig.dim=c(6, 3), fig.cap="Whole-mouth average pocket depth set imputation diagnostics."}
+# Diagnostic checking; imputed entries are all plausible
+stripplot(impute.pd, pch = 20, cex = 1)
+```
+
+### Whole-Mouth Average Attachment Loss
+
+```{r, echo=FALSE, fig.dim=c(6, 3), fig.cap="Whole-mouth average attachment loss set imputation diagnostics."}
+# Diagnostic checking; imputed entries are all plausible
+stripplot(impute.att, pch = 20, cex = 1)
+```
+
+\newpage
+
+## Class Balance for Missing Data
+```{r, echo=FALSE}
+missing_data <- data[rowSums(is.na(data)) > 0,] %>%
+  drop_na(age, smoker)
+
+vars <- missing_data %>% select(-id, -trtgroup, -contains("attach"), -contains("pd")) %>% base::colnames()
+cat_vars <- c("sex", "race", "smoker")
+table1_missing <- CreateTableOne(vars = vars, factorVars = cat_vars, data = missing_data)
+print(table1_missing, print = F) %>% 
+  as.data.frame() %>% 
+  knitr::kable(caption = "Missing data description")
+```
+
+## Model Diagnostics
+
+### Whole-Mouth Average Pocket Depth
+```{r, echo = FALSE, fig.dim=c(6, 3), fig.cap="Whole-mouth average pocket depth adjusted model residuals and Q-Q plot."}
+par(mfrow = c(1, 2))
+plot(adj_fit.pd$analyses[[1]], which = c(2, 1))
+```
+
+\newpage
+
+### Whole-Mouth Average Attachment Loss
+```{r, echo = FALSE, fig.dim=c(6, 3), fig.cap="Whole-mouth average attachment loss adjusted model residuals and Q-Q plot."}
+par(mfrow = c(1, 2))
+plot(adj_fit.att$analyses[[1]], which = c(2, 1))
+```
+
+
+
+

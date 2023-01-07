@@ -1,0 +1,260 @@
+---
+title: 'Longitudinal Project Update: EDA'
+author: "Brenton Graham"
+date: '2022-11-18'
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+require(tidyverse)
+require(ggpubr)
+require(naniar)
+require(table1)
+require(lcmm)
+require(magrittr)
+```
+
+## Background
+Pulmonary exacerbations (PEx) are a leading cause of morbidity in cystic fibrosis (CF). Treatment response is often suboptimal despite seemingly appropriate antimicrobial therapy. In this study, we seek to determine changes in airway microbiome and clinical response with onset and treatment of a PEx in children and adolescents with CF. Participants hospitalized for PEx were evaluated at admission, hospital discharge and a follow-up clinic visit. Sputum and blood samples were collected along with lung function and PEx score. Quantitative CF cultures were performed. Sputum and plasma were analyzed for inflammatory and protein markers.
+
+## Data
+```{r}
+# Import and factor data
+data <- read_delim("883LongitudinalData.csv", delim=",") %>%
+  mutate(time = factor(time, levels = c(1, 2, 3), labels = c("T1", "T2", "T3")),
+         gender = factor(gender, levels = c(1, 2), labels = c("Male", "Female")),
+         genotype = factor(genotype, levels = c(0:2), labels = c("0 F508del", "1 F508del", "2 F508del")),
+         admit.cf_pathogens = factor(admit.cf_pathogens),
+         admit.coinfect = factor(admit.coinfect),
+         hosp_pastyr = factor(hosp_pastyr),
+         log_crp = log(crp),
+         log_elastase = log(elastase)) %>%
+  select(-pe_pastyr) %>%
+  unite("ID", sid:time, sep = "_", remove = FALSE) %>%
+  column_to_rownames("ID")
+
+# Remove healthy IDs
+`%not in%` <- Negate(`%in%`)
+healthy_ids <- data %>% filter(time == "T1") %>% filter(elastase < 1) %>% pull(sid)
+data.include <- data %>% filter(sid %not in% healthy_ids)
+
+# Output SAS data
+sas_data <- data.include
+sas_data$log_elastase[which(is.na(sas_data$log_elastase))] <- "."
+sas_data %>% write.table(file = "883LongitudinalData_SAS.csv", row.names = FALSE, sep = ",")
+```
+
+### Subjects & Repeated Measures
+Data from 17 unique subjects and 19 pulmonary exacerbations are present in this data set (i.e., two subjects had exacerbations on two separate occasions). For each exacerbation there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days.  
+```{r}
+data.include %>%
+  filter(time == "T1") %>%
+  table1(~gender + age + bmi + genotype + admit.cf_pathogens + admit.coinfect, 
+         caption = "Table 1. Demographics of study population.", data = .)
+```
+
+### Variable Description
+#### Outcomes
+We're interested in modeling several potential response outcomes over time, including the following.
+
+- fev1_pred: FEV1, a measure of lung function (the higher the better) 
+- pes_total: PEx score (the lower the better) 
+- crp: C-reactive protein, a measure of inflammation (the lower the better)  
+- elastase: An enzyme marker
+- We could possibly be interested in modeling 16S taxa counts
+
+```{r}
+# Function to plot density of outcomes
+plot.density <- function(data, outcome, title) {
+  palette = c("goldenrod1", "red", "skyblue1")
+  plot <- data %>%
+    ggplot(aes_string(x = outcome)) +
+    geom_density(aes(color = time, fill = time), alpha = 0.5) +
+    scale_fill_manual(values = palette) +
+    scale_color_manual(values = palette) +
+    ggtitle(title) +
+    labs(x = "", y = "Density") +
+    guides(fill = guide_legend("Time Point"), color = guide_legend("Time Point")) +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust=0.5, size=11),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank(),
+          legend.key.size = unit(.3, 'cm'), 
+          legend.text = element_text(size = 10),
+          legend.position = "bottom")
+  return(plot)
+}
+
+# Plot distribution of each outcome factored by time
+density.fev1 <- plot.density(data.include, "fev1_pred", "FEV-1")             # FEV-1
+density.pes <- plot.density(data.include, "pes_total", "PEx Score")          # PEx Score
+density.crp <- plot.density(data.include, "log_crp", "log(CRP)")             # log(CRP)
+density.elast <- plot.density(data.include, "log_elastase", "log(Elastase)") # Elastase
+
+# Plot together
+dist_fig <- ggarrange(density.fev1, density.pes, density.crp, density.elast, 
+                      ncol=2, nrow=2, common.legend = TRUE, legend = "bottom")
+show(dist_fig)
+```
+
+```{r}
+# Function to plot spaghetti plots of outcomes over time
+plot.spaghetti <- function(data, outcome, title) {
+  plot <- data %>%
+    ggplot(aes_string(x = "time", y = outcome)) +
+    geom_point(size = 0.5) +
+    geom_smooth() +
+    geom_line(alpha = 0.6, aes(group = sid)) +
+    ggtitle(title) +
+    labs(y = title, x = "") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust=0.5, size=11))
+  return(plot)
+}
+
+# Plot each outcome over time with spaghetti
+spaghetti.fev1 <- plot.spaghetti(data.include, "fev1_pred", "FEV-1")                 # FEV-1
+spaghetti.pes <- plot.spaghetti(data.include, "pes_total", "PEx Score")              # PEx Score
+spaghetti.log_crp <- plot.spaghetti(data.include, "log_crp", "log(CRP)")             # log(CRP)
+spaghetti.log_elast <- plot.spaghetti(data.include, "log_elastase", "log(Elastase)") # log(Elastase)
+
+# Plot together
+spaghetti_fig <- ggarrange(spaghetti.fev1, spaghetti.pes, spaghetti.log_crp, spaghetti.log_elast,
+                           ncol=2, nrow=2, common.legend = TRUE, legend = "bottom")
+show(spaghetti_fig)
+```
+
+#### Explanatory Variables
+In this data set we have a collection of interesting explanatory variables. These include important CF pathogen measures (from both culture and 16S rRNA sequencing) and viral measures at admission. Well known CF pathogens include Pseudomonas aeruginosa, Staphylococcus aureus, Haemophilus influenzae, Stenotrophomonas maltophilia, Achromobacter xylosoxidans and Burkholderia cepacia.  
+
+In general, we'd like to get a sense of whether or not there is anything at admission that can be used to predict the subject's response to treatment. To simplify things, we will test two primary explanatory variables: 
+
+1. **Number of CF pathogens detected at admission.** This is the sum of binary detection results from culture. There are some studies suggesting that increased CF pathogens has negative impacts on treatment response.    
+
+2. **Bacterial/Viral co-infection at admission.** This is a binary variable that indicates whether or not **both** CF and viral pathogens were detected when the subject was admitted.  
+
+
+#### Additional Predictors / Precision Variables
+The following variables will be included as covariates in all models.
+
+- Gender  
+- Age  
+- BMI  
+- Number of hospitalizations in the past year
+- Genotype: There is a specific genetic mutation of interest in CF patients. This variable indicates the number of F508del mutations.  
+
+### Missing Data in Our Outcomes
+There are some missing data in our outcome variables (shown below).  
+```{r}
+# Visualize missingness
+data.include %>% vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+
+## Analysis
+There aren't necessarily any obvious grouping variables in this data set (i.e., there aren't treatment groups for which we'd like to compare). However, we are interested in the trajectory of our outcomes and it would be biologically interesting to assess if certain factors are associated with distinct outcome trajectories. To accomplish this we can use a latent class mixture model to cluster subjects into latent classes based on outcome trajectories. Once classes are assigned, we can use post-hoc analysis methods to characterize risk factor profiles that might be driving the trajectory differences. Baseline clinical markers will be used in this latent class-separation analysis. This will allow us to determine if there are any baseline indicators of treatment response trajectory.  
+
+### Latent Class Mixed Modeling
+In the first step of the analysis we will fit a latent class mixed model. Based on discussions with investigators, the elastase marker might make for the most biologically interesting latent class results. It will be most practical and appropriate to treat time as a class variable for the following reasons. First, there are only three time points, so we do not need to be concerned about the number of parameters we incorporate in the model. Second, modeling time as a class variable allows for the most flexibility. From the spaghetti plots it is obvious that the effect of time on the outcomes is not linear; quadratic relationships likely exists between time and the outcomes. Modeling time as a class variable will allow us to account for this.  
+
+Looking at the data structure, we should account for within-subject correlation. We can also consider including a random effect for the time variable since each time point relates to different outcome expectations (i.e., at time point 1 the subject is experiencing an exacerbation; at time point 2 the subject is on antibiotics and symptoms/outcomes are expected to improve). In other words, there should be some between-subject correlation at each time point. This is something that I'm not entirely confident in, however, and need to spend more time thinking about.    
+
+#### Latent Class Model Selection
+This method requires users to specify the number of latent classes that should be created. As such, there is a model selection step. Below are results from models using 1-5 latent classes. Standard information criteria can be used to select the optimal number of latent classes.  
+```{r}
+# Latent class mixed modeling; a random intercept is included by default
+# Base model with one latent class
+m1 <- hlme(log_elastase ~ time, random = ~1 + time, subject = 'sid',
+           data = data.include, ng = 1, idiag = T, verbose = F)
+
+# Fit a variety of models with 2-5 latent classes
+# 2 Latent Classes -------------------------------------------------------------
+m2 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 2, idiag = T, data = data.include, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# 3 Latent Classes -------------------------------------------------------------
+m3 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 3, idiag = T, data = data.include, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# 4 Latent Classes -------------------------------------------------------------
+m4 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 4, idiag = T, data = data.include, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# 5 Latent Classes -------------------------------------------------------------
+m5 <- gridsearch(
+  hlme(log_elastase ~ time, mixture = ~time, random = ~1 + time, subject = 'sid',
+       ng = 5, idiag = T, data = data.include, verbose = F), rep = 50, maxiter = 10, minit = m1)
+
+# Model comparison
+summarytable(m1, m2, m3, m4, m5, which = c("G", "loglik", "AIC", "BIC", "%class"))
+
+# Merge SID latent class assignments
+latent_classes <- m2$pprob[, 1:2] %>%
+  merge(m3$pprob[, 1:2], by = "sid") %>%
+  merge(m4$pprob[, 1:2], by = "sid") %>%
+  merge(m5$pprob[, 1:2], by = "sid") %>%
+  set_colnames(c("sid", "ng2", "ng3", "ng4", "ng5"))
+
+# Merge to full data frame
+data.latent_incl <- data.include %>%
+  merge(latent_classes, by = "sid", all.x = T) %>%
+  mutate(ng2 = factor(ng2), ng3 = factor(ng3), ng4 = factor(ng4), ng5 = factor(ng5))
+```
+
+#### Latent Class Visualization
+Below we can see how these clusters look based on number of clusters and outcome trajectory.
+```{r}
+# Function to plot spaghetti plots of outcomes over time colored by latent class
+plot.latent.spaghetti <- function(data, outcome, group, title) {
+  plot <- data %>%
+    ggplot(aes_string(x = "time", y = outcome)) +
+    geom_point(aes_string(color = group), size = 0.8) +
+    geom_smooth(aes_string(color = group)) +
+    geom_line(size = 1, alpha = 0.6, aes_string(group = "sid", color = group)) +
+    ggtitle(title) +
+    labs(y = "log(Elastase)", x = "", color = "Class") +
+    ggthemes::scale_colour_wsj("colors6") +
+    theme_bw() +
+    theme(panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust=0.5, size=11))
+  return(plot)
+}
+
+# Plot for each latent class count
+lcmm.ng2 <- plot.latent.spaghetti(data.latent_incl, "log_elastase", "ng2", "2 Latent Classes")
+lcmm.ng3 <- plot.latent.spaghetti(data.latent_incl, "log_elastase", "ng3", "3 Latent Classes")
+lcmm.ng4 <- plot.latent.spaghetti(data.latent_incl, "log_elastase", "ng4", "4 Latent Classes")
+lcmm.ng5 <- plot.latent.spaghetti(data.latent_incl, "log_elastase", "ng5", "5 Latent Classes")
+
+# Plot together
+latent_fig <- ggarrange(lcmm.ng2, lcmm.ng3, lcmm.ng4, lcmm.ng5, ncol=2, nrow=2)
+show(latent_fig)
+```
+
+#### Mixed Model Results
+Below is an example of the results that can be viewed for each model. I still need to look into which number of classes makes the most sense. We can use the table above, which displays AIC, BIC, and the number of subjects assigned to each latent class, to decide on this. I also need to figure out how to display random effects estimates.  
+```{r}
+summary(m4)
+```
+
+```{r}
+latentClass_results <- m4$pprob
+latentClass_results
+```
+
+
+
+
+

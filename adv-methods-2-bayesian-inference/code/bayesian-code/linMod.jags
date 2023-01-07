@@ -1,0 +1,18 @@
+model {
+	
+	# likelihood
+
+	for (i in 1:N) {
+
+		y[i] ~ dnorm(eta[i], tau)
+		eta[i] <- X[i,] %*% beta
+
+	}
+
+	# priors
+
+	beta[1:p] ~ dmnorm(m, R)
+	tau ~ dgamma(a, b)
+	sigma2 <- 1/tau
+
+}

@@ -1,0 +1,898 @@
+---
+title: 'Project 1 Analysis Plan: Bios6624'
+author: |
+ | Analyst: Brenton Graham
+ |
+ | Report generated: `r format(Sys.Date(), '%m/%d/%Y')`
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document: default
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = F, warning = F, echo = T)
+require(tidyverse)
+require(readr)
+require(naniar)
+require(ggpubr)
+require(tableone)
+require(kableExtra)
+require(car)
+require(broom)
+require(rjags)
+require(coda)
+require(mcmcse)
+require(magick)
+```
+
+# Introduction
+An ongoing prospective cohort study (the Multicenter AIDS Cohort Study) has collected up to eight years of longitudinal data measuring the health of HIV-1-positive subjects who have been treated with highly active antiretroviral treatment (HAART). While HAART is a standard treatment for individuals infected with HIV-1, the efficacy of the treatment is uncertain for individuals who use hard drugs, such as heroin and cocaine. The purpose of this secondary study is to assess if treatment responses differ between HIV-1-positive subjects who do and do not report to use hard drugs at baseline. Primary health outcomes of interest in this study include viral load, CD4+ T cell count, aggregate physical quality of life score, and aggregate mental quality of life score. Outcomes were measured at multiple time points. Analysis is focused on outcome measurements at baseline and two years, with respect to treatment initiation. More aggressive treatment options ought to be used by hard drug users if laboratory health response disparities are present. Additionally, alternative treatments should be explored if treatments are unexpectedly associated with worsened quality of life scores. The report will focus on testing the hypotheses detailed below.
+
+# Data Preparation
+## Variable Encoding, Data Filtering & Missing Data Visualization
+```{r}
+# Import raw data
+raw_data <- paste(getwd(), "hiv_6624_final.csv", sep = "/") %>% 
+  read_delim(delim = ",") %>%
+  select(-...1) # drop unnecessary column in raw data
+
+# Factor categorical variables into interpretable categories
+# Note: All insufficient data values are converted to NA, additional encodings
+#       that are converted to NA are noted
+
+# Levels for variables encoded with case_when statement
+# Here we set the reference category as the first category in the vector
+income_factor <- c("<$10K", "$10-20K", "$20-30K", "$30-40K", "$40-50K", "$50-60K", "$60K+") # Ref: "< $10K"
+ADH_factor <- c("100%","95-99%", "75-94%", "<75%")
+RACE_factor <- c("White, non-Hisp", "White, Hisp", "Black, non-Hisp", "Black, Hispanic",
+                 "AI or AN", "Asian or PI", "Other, non-Hisp", "Other, Hisp") # Ref: White, non-Hisp
+EDUCBAS_factor <- c("8th grade or less", "9-11th grade", "12th grade", "College, no degree", 
+                    "College, degree", "Some graduate work", "Post-graduate degree")
+
+# Encode variables
+data <- raw_data %>%
+  dplyr::rename(subject_id = newid) %>%
+  mutate(HASHV = factor(HASHV, c(1, 2), c("No", "Yes")),
+         HASHF = factor(HASHF, c(0, 1, 2, 3, 4), c("Never", "Daily", "Weekly", "Monthly", "Less Often")),
+         # income - no answer -> NA
+         income = factor(case_when(
+           income == 1 ~ "<$10K",
+           income == 2 ~ "$10-20K",
+           income == 3 ~ "$20-30K",
+           income == 4 ~ "$30-40K",
+           income == 5 ~ "$40-50K",
+           income == 6 ~ "$50-60K",
+           income == 7 ~ "$60K+"
+         ), levels = income_factor, labels = income_factor),
+         # BMI - insufficient data & improbable value -> NA
+         BMI = ifelse(BMI %in% c(999, -1), NA, BMI),
+         # High BP - group Y/N, improbable value -> NA
+         HBP = factor(case_when(
+           HBP %in% c(1, 3) ~ "No",
+           HBP %in% c(2, 4) ~ "Yes"
+         ), levels = c("No", "Yes"), labels = c("No", "Yes")), # Ref: No
+         # Diabetes - group Y/N
+         DIAB = factor(case_when(
+           DIAB %in% c(1, 3) ~ "No",
+           DIAB %in% c(2, 4) ~ "Yes"
+         ), levels = c("No", "Yes"), labels = c("No", "Yes")), # Ref: No
+         # Liver disease stage 3/4
+         LIV34 = factor(LIV34, c(1, 2), c("No", "Yes")),
+         # Kidney disease - group Y/N
+         KID = factor(case_when(
+           KID %in% c(1, 3) ~ "No",
+           KID %in% c(2, 4) ~ "Yes"
+         ), levels = c("No", "Yes"), labels = c("No", "Yes")), # Ref: No
+         # Frailty related phenotype
+         FRP = factor(FRP, c(1, 2), c("No", "Yes")),
+         # Frailty phenotype
+         FP = factor(FP, c(1, 2), c("No", "Yes")),
+         # Dyslipidemia at visit
+         DYSLIP = factor(case_when(
+           DYSLIP %in% c(1, 3) ~ "No",
+           DYSLIP %in% c(2, 4) ~ "Yes"
+         ), levels = c("No", "Yes"), labels = c("No", "Yes")), # Ref: No
+         # Depression scale - convert to binary based on information given
+         CESD = ifelse(CESD == -1, NA, CESD),
+         # Perform below if we want to create a categorical variable for CESD
+         CESD = ifelse(CESD < 16, "No", "Yes"),
+         CESD = factor(CESD, levels = c("No", "Yes"), labels = c("No", "Yes")),
+         # Smoking status
+         SMOKE = factor(SMOKE, c(1, 2, 3), c("Never", "Former", "Current")),
+         # Drinking group
+         DKGRP = factor(DKGRP, c(0, 1, 2, 3), c("None", "1-3", "4-13", "14+")),
+         # Took heroin/opiates since last visit
+         HEROPIATE = factor(HEROPIATE, c(1, 2), c("No", "Yes")),
+         # Took drugs with a needle since last visit
+         IDU = factor(IDU, c(1, 2), c("No", "Yes")),
+         # Adherence to meds taken since last visit
+         ADH = factor(case_when(
+           ADH == 1 ~ "100%",
+           ADH == 2 ~ "95-99%",
+           ADH == 3 ~ "75-94%",
+           ADH == 4 ~ "<75%"
+         ), levels = ADH_factor, labels = ADH_factor),
+         # Race groups
+         RACE = factor(case_when(
+           RACE == 1 ~ "White, non-Hisp",
+           RACE == 2 ~ "White, Hisp",
+           RACE == 3 ~ "Black, non-Hisp",
+           RACE == 4 ~ "Black, Hispanic",
+           RACE == 5 ~ "AI or AN",
+           RACE == 6 ~ "Asian or PI",
+           RACE == 7 ~ "Other, non-Hisp",
+           RACE == 8 ~ "Other, Hisp"
+         ), levels = RACE_factor, labels = RACE_factor),
+         # Education base
+         EDUCBAS = factor(case_when(
+           EDUCBAS == 1 ~ "8th grade or less",
+           EDUCBAS == 2 ~ "9-11th grade",
+           EDUCBAS == 3 ~ "12th grade",
+           EDUCBAS == 4 ~ "College, no degree",
+           EDUCBAS == 5 ~ "College, degree",
+           EDUCBAS == 6 ~ "Some graduate work",
+           EDUCBAS == 7 ~ "Post-graduate degree"
+         ), levels = EDUCBAS_factor, labels = EDUCBAS_factor),
+         # HIV positive
+         hivpos = factor(hivpos, c(0, 1), c("No", "Yes")),
+         # Take ART at visit
+         ART = factor(ART, c(0, 1), c("No", "Yes")),
+         # Ever took ART
+         everART = factor(everART, c(0, 1), c("No", "Yes")),
+         # Either injection drugs or illicit heroin/opiate use since last visit
+         hard_drugs = factor(hard_drugs, c(0, 1), c("No", "Yes"))
+  )
+
+# If we want to see why some subjects have missing data for time point 2 we could try something like this
+# ie. subjects have baseline measurement, no measurement at time 2, but then further measurements
+# Can we test why these subjects are missing time point 2 data?
+# For the purpose of this analysis, let's just take all subjects that have baseline and time point 2 data
+#data %>% select(subject_id, years) %>%
+#  mutate(present = 1) %>%
+#  pivot_wider(names_from = years, values_from = present, names_prefix = "year_") %>%
+#  mutate_all(funs(replace_na(., 0))) %>%
+#  mutate(past_t2_measures = year_3 + year_4 + year_5 + year_6 + year_7) %>%
+#  mutate(past_t2_present = ifelse(past_t2_measures == 0, 0, 1)) %>%
+#  select(year_0, year_2, past_t2_present) %>%
+#  filter(year_2 == 0)
+
+# Extract subject IDs for those who have both baseline and two year measurements
+subjects.baseline <- data %>% filter(years == 0) %>% select(subject_id)
+subjects.year_two <- data %>% filter(years == 2) %>% select(subject_id)
+subject_filter <- dplyr::intersect(subjects.baseline, subjects.year_two) %>% pull
+
+# Select data at time points of interest
+data.focused <- data %>% filter(years %in% c(0, 2)) %>%
+  # Order columns: ID, time, outcomes, primary variable, everything else
+  select(subject_id, years, VLOAD, LEU3N, AGG_PHYS, AGG_MENT, hard_drugs, everything()) %>%
+  filter(subject_id %in% subject_filter) %>% # Only subjects w/ tp 0 and 2 data
+  mutate(years = factor(years, levels = c(0, 2), labels = c("BL", "2Yr")))
+
+# Visualize missing data for focused set
+data.focused %>% 
+  arrange(years, subject_id) %>%
+  naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+
+# From this missingness we can see that adherence to medicine is missing
+# only from baseline - should use 2yr data for model
+```
+
+## EDA - Pre-processing
+```{r}
+# Visualize distribution of outcome variables per time point
+# Viral load histogram - we'll need to use log(VLOAD)
+hist.viral <- data.focused %>%
+  ggplot(aes(x = log(VLOAD))) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    facet_wrap(~years) +
+    ggtitle("Viral Load") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# Viral load density
+dens.viral <- data.focused %>%
+  ggplot(aes(x = log(VLOAD))) +
+    geom_density(aes(color = hard_drugs), alpha = 0.6) +
+    facet_wrap(~years) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# Viral load distributions plotted together
+ggarrange(hist.viral, dens.viral, nrow=2)
+
+# CD4+ t cell histogram
+hist.leu3n <- data.focused %>%
+  ggplot(aes(x = LEU3N)) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    facet_wrap(~years) +
+    ggtitle("CD4+ T-Cell Counts") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# CD4+ t cell density
+dens.leu3n <- data.focused %>%
+  ggplot(aes(x = LEU3N)) +
+    geom_density(aes(color = hard_drugs), alpha = 0.6) +
+    facet_wrap(~years) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# CD4+ t cell distributions plotted together
+ggarrange(hist.leu3n, dens.leu3n, nrow=2)
+
+# Aggregate Physical Quality of Life Scores histogram
+hist.agg_phys <- data.focused %>%
+  ggplot(aes(x = AGG_PHYS)) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    facet_wrap(~years) +
+    ggtitle("Aggregate Physical Quality of Life Scores") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# Aggregate Physical Quality of Life Scores density
+dens.agg_phys <- data.focused %>%
+  ggplot(aes(x = AGG_PHYS)) +
+    geom_density(aes(color = hard_drugs), alpha = 0.6) +
+    facet_wrap(~years) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# Aggregate Mental Quality of Life Scores distributions plotted together
+ggarrange(hist.agg_phys, dens.agg_phys, nrow=2)
+
+# Aggregate Mental Quality of Life Scores histogram
+hist.agg_ment <- data.focused %>%
+  ggplot(aes(x = AGG_MENT)) +
+    geom_histogram(stat = "bin", bins = 15, color = "white", fill = "lightsteelblue") +
+    facet_wrap(~years) +
+    ggtitle("Aggregate Mental Quality of Life Scores") +
+    labs(x = "") +
+    theme_bw() +
+    theme(plot.title = element_text(hjust=0.5, size=11),
+          axis.title = element_text(size=8))
+
+# Aggregate Mental Quality of Life Scores density
+dens.agg_ment <- data.focused %>%
+  ggplot(aes(x = AGG_MENT)) +
+    geom_density(aes(color = hard_drugs), alpha = 0.6) +
+    facet_wrap(~years) +
+    theme_bw() +
+    theme(legend.position = "bottom",
+          legend.key.size = unit(.3, 'cm'),
+          legend.text = element_text(size = 8),
+          legend.title = element_text(size = 8),
+          axis.title = element_text(size=8))
+
+# Aggregate Mental Quality of Life Scores distributions plotted together
+ggarrange(hist.agg_ment, dens.agg_ment, nrow=2)
+```
+
+## Data Transformation
+```{r}
+# From EDA we know that viral load should be log-transformed
+# Perform transformation
+data.focused_transform <- data.focused %>%
+  mutate(logVLOAD = log(VLOAD)) %>%
+  select(subject_id, years, logVLOAD, LEU3N, AGG_PHYS, AGG_MENT, hard_drugs, everything()) %>%
+  select(-VLOAD) # Remove non-transformed VLOAD
+```
+
+```{r}
+# Convert the data set to wide format for baseline-as-covariate model
+data_wide <- data.focused_transform %>%
+  pivot_wider(names_from = years, values_from = logVLOAD:everART)
+
+# Creating data set that uses baseline predictor values
+data_wide.baseline <- data_wide %>% select(subject_id, contains("_BL"), -ADH_BL)
+data_wide.2yr <- data_wide %>% select(subject_id, contains("_2Yr")) %>% select(subject_id:AGG_MENT_2Yr, ADH_2Yr)
+
+# Baseline as covariate data set
+data.bac <- merge(data_wide.baseline, data_wide.2yr, by = "subject_id") %>%
+  select(contains("VLOAD"), contains("LEU3N"), contains("AGG_PHYS"), contains("AGG_MENT"), everything()) %>%
+  column_to_rownames("subject_id") %>%
+  dplyr::rename(
+    HardDrugUse = hard_drugs_BL,
+    HASHV = HASHV_BL,
+    HASHF = HASHF_BL,
+    Income = income_BL,
+    BMI = BMI_BL,
+    HighBloodPressure = HBP_BL,
+    DIAB = DIAB_BL,
+    LIV34 = LIV34_BL,
+    KID = KID_BL,
+    FrailtyRelatedPhenotype = FRP_BL,
+    FP = FP_BL,
+    TCHOL = TCHOL_BL,
+    TRIG = TRIG_BL,
+    LDL = LDL_BL,
+    DYSLIP = DYSLIP_BL,
+    Depressed = CESD_BL,
+    SmokingStatus = SMOKE_BL,
+    DrinksPerWeek = DKGRP_BL,
+    HEROPIATE = HEROPIATE_BL,
+    IDU = IDU_BL,
+    EDUCBAS = EDUCBAS_BL,
+    hivpos = hivpos_BL,
+    Race = RACE_BL,
+    Age = age_BL,
+    ART = ART_BL,
+    everART = everART_BL,
+    TreatmentAdherence = ADH_2Yr
+  )
+
+# Visualize missingness again
+data.bac %>% naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+## Variable Selection
+### (1) Drop variables with substantial missingness
+Looking at the data, we'll use and arbitrary threshold of 20% (ie. drop columns if >20% of observations are missing data)
+```{r}
+# Drop features with >30% missing in column
+drop_features.miss <- c("DIAB", "LIV34", "KID", "TCHOL", "TRIG", "LDL", "DYSLIP", "FP")
+data.bac.drop_miss <- data.bac %>% select(-drop_features.miss)
+
+# Visualize updated set
+data.bac.drop_miss %>% naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+### (2) Drop variables that contain only one value
+Variables with one value are uninformative for modeling purposes. These variables will be removed.
+```{r}
+# Determine if columns contain only one factor
+# Adapted from https://stackoverflow.com/questions/30544282/how-to-remove-columns-with-same-value-in-r
+vapply(data.bac.drop_miss, function(x) length(unique(x)) == 1, logical(1L)) %>%
+  as.data.frame() %>%
+  dplyr::rename("all_one_value" = ".") %>%
+  filter(all_one_value == TRUE)
+# Results: hivpos_BL, ART_BL and everART_BL all only contain one value and are uninformative
+
+# Remove these variables
+data.bac2 <- data.bac.drop_miss %>% select(-c("hivpos", "ART", "everART"))
+data.bac2 %>% naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+### (3) Drop variables that are used to derive other variables
+We can expect there to be multicollinearity between variables that derived from one another. As such, we can remove these variables. The data dictionary states that the primary variable (hard drug use) is derived from the IDU and HEROPIATE variables. That is, the information that is in the IDU and HEROPIATE variables is contained within the primary variable. We can drop the IDU and HEROPIATE variables.  
+```{r}
+# hard_drugs is derived from IDU and HEROPIATE variables - drop IDU and HEROPIATE
+data.bac3 <- data.bac2 %>% select(-IDU, -HEROPIATE)
+```
+
+### (4) Multicollinearity assessment
+```{r}
+# Multicollinearity question: can a covariate be predicted from the other covariates?
+# Numeric feature pairwise correlation assessment (including outcomes here)
+data.bac3 %>%
+  select_if(is.numeric) %>%
+  cor(use = "complete.obs") %>% round(2)
+# Notes: No correlation between BMI and age (-0.04)
+# Also little/no correlation between numeric covariates and outcomes which is interesting
+# Will probably just include these variables as precision variables
+```
+
+```{r}
+# Checking multicollinearity with VIF - this is generalized so it should work for categorical
+# I'll model each outcome and see if there are consistencies
+
+# Function to check VIF scores for each variable
+# Models each outcome and displays VIF per variable per outcome; will use recursively
+VIF_check <- function(df) {
+  
+  # Get VIF values for each variable / VLOAD
+  data.bac.vload <- df %>% 
+    select(-contains("LEU3N"), -contains("AGG_PHYS"), -contains("AGG_MENT"))
+  model.bac.vload <- lm(logVLOAD_2Yr ~ ., data = data.bac.vload)
+  vif.vload <- car::vif(model.bac.vload) %>% as.data.frame() %>% select(GVIF) %>% dplyr::rename(VLOAD_mod_GVIF = GVIF)
+  
+  # Get VIF values for each variable / LEU3N
+  data.bac.leu3n <- df %>% 
+    select(-contains("VLOAD"), -contains("AGG_PHYS"), -contains("AGG_MENT"))
+  model.bac.leu3n <- lm(LEU3N_2Yr ~ ., data = data.bac.leu3n)
+  vif.leu3n <- car::vif(model.bac.leu3n) %>% as.data.frame() %>% select(GVIF) %>% dplyr::rename(LEU3N_mod_GVIF = GVIF)
+  
+  # Get VIF values for each variable / AGG_PHYS
+  data.bac.phys <- df %>% 
+    select(-contains("VLOAD"), -contains("LEU3N"), -contains("AGG_MENT"))
+  model.bac.phys <- lm(AGG_PHYS_2Yr ~ ., data = data.bac.phys)
+  vif.phys <- car::vif(model.bac.phys) %>% as.data.frame() %>% select(GVIF) %>% dplyr::rename(PHYS_mod_GVIF = GVIF)
+  
+  # Get VIF values for each variable / AGG_MENT
+  data.bac.ment <- df %>% 
+    select(-contains("VLOAD"), -contains("LEU3N"), -contains("AGG_PHYS"))
+  model.bac.ment <- lm(AGG_MENT_2Yr ~ ., data = data.bac.ment)
+  vif.ment <- car::vif(model.bac.ment) %>% as.data.frame() %>% select(GVIF) %>% dplyr::rename(MENT_mod_GVIF = GVIF)
+  
+  # Print table
+  print(cbind(vif.vload, vif.leu3n, vif.phys, vif.ment)[-1,])
+}
+
+VIF_check(data.bac3)
+```
+```{r}
+# Features with highest VIF will be continually dropped (VIF > 5)
+data.bac.vif_remove <- data.bac3 %>% select(-EDUCBAS) # Drop features above
+
+# Display updated VIFs
+VIF_check(data.bac.vif_remove)
+# Results: EDUCBAS removed, likely associated with income
+```
+
+### (4) Drop variable that are likely derived from another feature
+When reading through the data dictionary, some variables are clearly derived from other variables. Here we'll test if there is redundancy between these suspect variables in an effort to further mitigate multicollinearity. Suspect variables include:
+
+- HASHV & HASHF
+
+```{r}
+# HASHV & HASHF
+table(data.bac.vif_remove$HASHV, data.bac.vif_remove$HASHF)
+stats::chisq.test(data.bac.vif_remove$HASHV, data.bac.vif_remove$HASHF, simulate.p.value = TRUE) # Chi-sq test
+# Result: These variables are independent - I am skeptical of the validity however based on the table
+```
+
+The HASH variable tables don't make sense intuitively. For example, 270 subjects claimed that their frequency of smoking hash was "never" in the last year. However, of these 270 individuals, 110 claim that they have smoked in the past year. Further, 24/160 respondents who selected "No" for smoking in the past year selected "Daily" for smoking frequency. I'm not sure if either of these variables can be trusted, so I am going to drop both from the data set.  
+
+```{r}
+# Drop variables from above
+drop_features.final <- c("HASHV", "HASHF")
+data.bac.final <- data.bac.vif_remove %>% select(-drop_features.final) #%>%
+  # Rename variables
+  #rename("Baseline log(Viral Load)" = logVLOAD_BL,
+  #       "Baseline CD4+ T Cell Count" = LEU3N_BL,
+  #       "Baseline Physical QOL" = AGG_PHYS_BL,
+  #       "Baseline Mental QOL" = AGG_MENT_BL)
+
+# View missingness of final set
+data.bac.final %>% naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+## Missingness  
+Data are determined to not be missing completely at random. However, due to time constraints, we will move forward with a complete-case analysis.
+```{r}
+# Test if missing data are MCAR
+data.bac.final %>% select(-contains("VLOAD"), -contains("LEU3N"), -contains("AGG_MENT"), -contains("AGG_PHYS")) %>% mcar_test()
+# Results - data are not MCAR
+
+# Complete-case data set that will be used for modeling
+data.modeling <- data.bac.final %>% drop_na()
+```
+
+## EDA - Post-processing
+```{r}
+# Set df for visualizations
+model_data.plotting <- data.modeling %>%
+  select(contains("_BL"), contains("_2Yr"), HardDrugUse)
+
+# Viral load density
+density_plot.vload <- model_data.plotting %>%
+  select(contains("VLOAD"), HardDrugUse) %>%
+  pivot_longer(cols = c(logVLOAD_BL, logVLOAD_2Yr), names_to = "Time", values_to = "logVLOAD") %>%
+  mutate(Time = gsub(".*_", "", Time)) %>%
+  mutate(Time = factor(Time, levels = c("BL", "2Yr"), labels = c("Baseline", "2 Years After Treatment Initiation"))) %>%
+  ggplot(aes(x = logVLOAD)) +
+    geom_density(aes(color = HardDrugUse, fill = HardDrugUse), alpha = 0.5, lwd = 0.9) +
+    facet_wrap(~Time, ncol = 1) +
+    ggtitle("log(Viral Load)") +
+    labs(x = "", y = "Density") +
+    ggplot2::scale_color_brewer(palette = "Set1") +
+    ggplot2::scale_fill_brewer(palette = "Pastel1") +
+    theme_bw() +
+    theme(legend.key.size = unit(.4, 'cm'),
+          legend.text = element_text(size = 11),
+          legend.title = element_text(size = 11),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          strip.text = element_text(color = "white"),
+          strip.background = element_rect(fill = "gray15"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust = 0.5)) +
+    guides(fill = guide_legend(title = "Hard Drug Use"),
+           color = guide_legend(title = "Hard Drug Use"))
+
+# CD4+ T cell count density
+density_plot.leu3n <- model_data.plotting %>%
+  select(contains("LEU3N"), HardDrugUse) %>%
+  pivot_longer(cols = c(LEU3N_BL, LEU3N_2Yr), names_to = "Time", values_to = "LEU3N") %>%
+  mutate(Time = gsub(".*_", "", Time)) %>%
+  mutate(Time = factor(Time, levels = c("BL", "2Yr"), labels = c("Baseline", "2 Years After Treatment Initiation"))) %>%
+  ggplot(aes(x = LEU3N)) +
+    geom_density(aes(color = HardDrugUse, fill = HardDrugUse), alpha = 0.5, lwd = 0.9) +
+    facet_wrap(~Time, ncol = 1) +
+    ggtitle("CD4+ T Cell Count") +
+    labs(x = "", y = "Density") +
+    ggplot2::scale_color_brewer(palette = "Set1") +
+    ggplot2::scale_fill_brewer(palette = "Pastel1") +
+    theme_bw() +
+    theme(legend.key.size = unit(.4, 'cm'),
+          legend.text = element_text(size = 11),
+          legend.title = element_text(size = 11),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          strip.text = element_text(color = "white"),
+          strip.background = element_rect(fill = "gray15"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust = 0.5)) +
+    guides(fill = guide_legend(title = "Hard Drug Use"),
+           color = guide_legend(title = "Hard Drug Use"))
+
+# Physical QOL density
+density_plot.phys <- model_data.plotting %>%
+  select(contains("PHYS"), HardDrugUse) %>%
+  pivot_longer(cols = c(AGG_PHYS_BL, AGG_PHYS_2Yr), names_to = "Time", values_to = "AGG_PHYS") %>%
+  mutate(Time = gsub(".*_", "", Time)) %>%
+  mutate(Time = factor(Time, levels = c("BL", "2Yr"), labels = c("Baseline", "2 Years After Treatment Initiation"))) %>%
+  ggplot(aes(x = AGG_PHYS)) +
+    geom_density(aes(color = HardDrugUse, fill = HardDrugUse), alpha = 0.5, lwd = 0.9) +
+    facet_wrap(~Time, ncol = 1) +
+    ggtitle("Aggregate Physical QOL Score") +
+    labs(x = "", y = "Density") +
+    ggplot2::scale_color_brewer(palette = "Set1") +
+    ggplot2::scale_fill_brewer(palette = "Pastel1") +
+    theme_bw() +
+    theme(legend.key.size = unit(.4, 'cm'),
+          legend.text = element_text(size = 11),
+          legend.title = element_text(size = 11),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          strip.text = element_text(color = "white"),
+          strip.background = element_rect(fill = "gray15"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust = 0.5)) +
+    guides(fill = guide_legend(title = "Hard Drug Use"),
+           color = guide_legend(title = "Hard Drug Use"))
+
+# Mental QOL density
+density_plot.ment <- model_data.plotting %>%
+  select(contains("MENT"), HardDrugUse) %>%
+  pivot_longer(cols = c(AGG_MENT_BL, AGG_MENT_2Yr), names_to = "Time", values_to = "AGG_MENT") %>%
+  mutate(Time = gsub(".*_", "", Time)) %>%
+  mutate(Time = factor(Time, levels = c("BL", "2Yr"), labels = c("Baseline", "2 Years After Treatment Initiation"))) %>%
+  ggplot(aes(x = AGG_MENT)) +
+    geom_density(aes(color = HardDrugUse, fill = HardDrugUse), alpha = 0.5, lwd = 0.9) +
+    facet_wrap(~Time, ncol = 1) +
+    ggtitle("Aggregate Mental QOL Score") +
+    labs(x = "", y = "Density") +
+    ggplot2::scale_color_brewer(palette = "Set1") +
+    ggplot2::scale_fill_brewer(palette = "Pastel1") +
+    theme_bw() +
+    theme(legend.key.size = unit(.4, 'cm'),
+          legend.text = element_text(size = 11),
+          legend.title = element_text(size = 11),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          strip.text = element_text(color = "white"),
+          strip.background = element_rect(fill = "gray15"),
+          panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          plot.title = element_text(hjust = 0.5)) +
+    guides(fill = guide_legend(title = "Hard Drug Use"),
+           color = guide_legend(title = "Hard Drug Use"))
+
+outcome_dens_plot <- ggarrange(
+  density_plot.vload, density_plot.leu3n, density_plot.phys, density_plot.ment, 
+  ncol = 2, nrow = 2, common.legend = TRUE, legend = "bottom"
+)
+
+ggsave(paste(getwd(), "/../Reports/FiguresTables/OutcomeDistributions.png", sep = ""), width = 8, height = 6)
+```
+
+## Table One
+```{r}
+# Table 1 (source: https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html)
+vars <- c("Age", "BMI", "HighBloodPressure", "Income", "FrailtyRelatedPhenotype", "Depressed", "SmokingStatus", "DrinksPerWeek", "Race", "TreatmentAdherence")
+cat_vars <- c("Income", "FrailtyRelatedPhenotype", "Depressed", "SmokingStatus", "DrinksPerWeek", "Race", "TreatmentAdherence")
+table1 <- CreateTableOne(vars = vars, factorVars = cat_vars, strata = "HardDrugUse", data = data.modeling)
+print(table1, print = F, nonnormal = T, minMax = T) %>% 
+  as.data.frame() %>% 
+  select(-test, -p) %>% 
+  rename("Hard-Drug Non-Users" = "No", "Hard-Drug Users" = "Yes") %>%
+  write.table(paste(getwd(), "/../Reports/FiguresTables/TableOne.tsv", sep = ""), 
+              sep = "\t", row.names = T, col.names = NA)
+```
+
+
+## Frequentist Analysis
+```{r}
+# Fit linear regression model for each outcome
+
+# Function to extract formatted model summary
+model_summary <- function(lm_model, p_digits) {
+  model_summary <- lm_model %>% 
+    broom::tidy(conf.int = T) %>%
+    select(term, estimate, conf.low, conf.high, p.value) %>% 
+    # Format columns
+    mutate(stars = ifelse(p.value < 0.01, "**", ifelse(p.value < 0.05, "*", "")),
+           estimate = format(round(estimate, digits = 2), nsmall = 2),
+           conf.low = format(round(conf.low, digits = 2), nsmall = 2),
+           conf.high = format(round(conf.high, digits = 2), nsmall = 2),
+           p.value = format.pval(p.value, eps = .001, digits = p_digits),
+           p.value = paste(p.value, stars, sep="")) %>%
+    mutate(CI = paste("(", trimws(conf.low), ", ", conf.high, ")", sep = "")) %>% # trimws is removing weird space
+    select("Parameter" = term, "Freq Est." = estimate, "95% CI" = CI, "p-value" = p.value)
+  return(model_summary)
+}
+
+# VLOAD outcome
+data.mod.vload <- data.modeling %>% select(-contains("LEU3N"), -contains("AGG_PHYS"), -contains("AGG_MENT"))
+lm_model.vload <- lm(logVLOAD_2Yr ~ ., data = data.mod.vload) # Fit model
+lm_model_summary.vload <- model_summary(lm_model.vload, 2)    # Extract summary
+lm_model_summary.vload %>%                                    # Display summary
+  knitr::kable(align = "cccc", caption = "")
+
+# LEU3N outcome
+data.mod.leu3n <- data.modeling %>% select(-contains("VLOAD"), -contains("AGG_PHYS"), -contains("AGG_MENT"))
+lm_model.leu3n <- lm(LEU3N_2Yr ~ ., data = data.mod.leu3n)    # Fit model
+lm_model_summary.leu3n <- model_summary(lm_model.leu3n, 2)    # Extract summary
+lm_model_summary.leu3n %>%                                    # Display summary
+  knitr::kable(align = "cccc", caption = "")
+
+# AGG_PHYS outcome
+data.mod.phys <- data.modeling %>% select(-contains("VLOAD"), -contains("LEU3N"), -contains("AGG_MENT"))
+lm_model.phys <- lm(AGG_PHYS_2Yr ~ ., data = data.mod.phys)   # Fit model
+lm_model_summary.phys <- model_summary(lm_model.phys, 1)      # Extract summary
+lm_model_summary.phys %>%                                     # Display summary
+  knitr::kable(align = "cccc", caption = "")
+
+# AGG_MENT outcome
+data.mod.ment <- data.modeling %>% select(-contains("VLOAD"), -contains("LEU3N"), -contains("AGG_PHYS"))
+lm_model.ment <- lm(AGG_MENT_2Yr ~ ., data = data.mod.ment)   # Fit model
+lm_model_summary.ment <- model_summary(lm_model.ment, 2)      # Extract summary
+lm_model_summary.ment %>%                                     # Display summary
+  knitr::kable(align = "cccc", caption = "")
+```
+
+## Bayesian Analysis
+```{r}
+# Sub-functions for performing Bayesian regression with JAGS
+# Function to fit JAGS model
+fit_jags <- function(y, X, jags.file) {
+  
+  N <- nrow(X)
+  p <- ncol(X)
+  
+  # Hyperparameters for prior distributions
+  a <- 0.01 # inverse gamma shape - vague prior
+  b <- 0.01 # inverse gamma rate - vague prior
+  m <- rep(0, p) # mvnorm mean
+  R <- matrix(0, p, p) # mvnorm covariance
+  diag(R) <- 0.001 # note that JAGS uses dispersion matrix (scalars)
+  
+  # Create data list to pass to JAGS
+  jags.data <- list(y = y, X = X, N = N, p = p, a = a, b = b, m = m, R = R)
+  
+  # Initialize the sampler (it's a Gibbs sampler so no need for several adaptations)
+  jags.mod <- jags.model(jags.file, data = jags.data, n.adapt = 1000, n.chains = 2)
+  return(jags.mod)
+  
+}
+
+# Function to get DIC of the fit model
+get_DIC <- function(jags.mod, iter) {
+  samples_dic <- rjags::dic.samples(jags.mod, n.iter = iter, type = "pD") # determine DIC of model fit (requires two chains)
+  return(samples_dic)
+}
+
+# Function to sample observations from the posterior distributions
+sample_posterior <- function(jags.mod, iter) {
+  samples <- rjags::coda.samples(jags.mod, variable.names = c("beta", "sigma2"), n.iter = iter) # generates matrix of draws from posterior dist.
+  return(samples)
+}
+
+## HPDI function
+hpd <- function(x, alpha = 0.05){
+  n = length(x)
+  m = round(n * alpha)
+  x = sort(x)
+  y = x[(n - m + 1):n] - x[1:m]
+  z = min(y)
+  k = which(y == z)[1]
+  c(x[k], x[n - m + k])
+}
+
+# Function to get HPDIs from JAGS model in a formatted table
+hpdi_summary <- function(X, samples) {
+  # Generate output table
+  draws <- as.matrix(samples)
+  out_mat <- matrix("", nrow = ncol(draws), ncol = 5)
+  out_mat[,1] <- c(colnames(X), "sigma2") # names
+  out_mat[,2] <- apply(draws, 2, function(x) format(round(mcse(x)$est, 2), nsmall=2)) # batch mean
+  out_mat[,3] <- apply(draws, 2, function(x) format(round(mcse(x)$se, 2), nsmall=2)) # MCSE
+  out_mat[,4] <- round(apply(draws, 2, sd), 2) # Std. Dev.
+  out_mat[,5] <- apply(draws, 2, function(x) paste("(", format(round(hpd(x)[1], 2), nsmall=2), ", ", format(round(hpd(x)[2], 2), nsmall=2), ")", sep = "")) # HPDI
+  colnames(out_mat) <- c("Parameter", "Estimate", "MCSE", "Std. Dev.", "95% HPDI")
+  out_mat <- out_mat %>% 
+    as.data.frame() %>% 
+    select("Parameter", "Bayes Est." = "Estimate", "95% HPDI")
+  return(out_mat)
+}
+```
+
+```{r}
+# logVLOAD - Bayesian model implementation
+y.vload <- c(data.mod.vload$logVLOAD_2Yr)
+X.vload <- model.matrix(
+  ~ logVLOAD_BL + HardDrugUse + BMI + Age + HighBloodPressure + TreatmentAdherence + FrailtyRelatedPhenotype + Depressed + Income + SmokingStatus + DrinksPerWeek + Race, 
+  data = data.mod.vload)
+jags.file <- paste(getwd(), "BayesianCode/linMod.jags", sep = "/")
+
+# 1. Fit JAGS model
+jags.mod.vload <- fit_jags(y = y.vload, X = X.vload, jags.file = jags.file)
+
+# 2. Sample posterior distribution
+samples.vload <- sample_posterior(jags.mod = jags.mod.vload, iter = 5000) 
+# window(start = 1001, end = 5000) - Consider burn-in
+
+# 3. Get HPDI summary table
+bayesian_results.vload <- hpdi_summary(X = X.vload, samples = samples.vload)
+bayesian_results.vload %>%                                     # Display summary
+  knitr::kable(align = "ccc", caption = "")
+
+# DIAGNOSTICS
+# Determine if the support of the parameter space is explored well (more adaptations)
+#plot(samples.vload)
+gelman.plot(samples.vload)
+```
+
+```{r}
+# CD4+ T cell counts - Bayesian model implementation
+y.leu3n <- c(data.mod.leu3n$LEU3N_2Yr)
+X.leu3n <- model.matrix(
+  ~ LEU3N_BL + HardDrugUse + BMI + Age + HighBloodPressure + TreatmentAdherence + FrailtyRelatedPhenotype + Depressed + Income + SmokingStatus + DrinksPerWeek + Race,
+  data = data.mod.leu3n)
+jags.file <- paste(getwd(), "BayesianCode/linMod.jags", sep = "/")
+
+# 1. Fit JAGS model
+jags.mod.leu3n <- fit_jags(y = y.leu3n, X = X.leu3n, jags.file = jags.file)
+
+# 2. Sample posterior distribution
+samples.leu3n <- sample_posterior(jags.mod = jags.mod.leu3n, iter = 5000)
+
+# 3. Get HPDI summary table
+bayesian_results.leu3n <- hpdi_summary(X = X.leu3n, samples = samples.leu3n)
+bayesian_results.leu3n %>%                                     # Display summary
+  knitr::kable(align = "ccc", caption = "")
+
+# DIAGNOSTICS
+# Determine if the support of the parameter space is explored well (more adaptations)
+#plot(samples.leu3n)
+gelman.plot(samples.leu3n)
+```
+
+```{r}
+# Aggregate physical quality of life score - Bayesian model implementation
+y.phys <- c(data.mod.phys$AGG_PHYS_2Yr)
+X.phys <- model.matrix(
+  ~ AGG_PHYS_BL + HardDrugUse + BMI + Age + HighBloodPressure + TreatmentAdherence + FrailtyRelatedPhenotype + Depressed + Income + SmokingStatus + DrinksPerWeek + Race, 
+  data = data.mod.phys)
+jags.file <- paste(getwd(), "BayesianCode/linMod.jags", sep = "/")
+
+# 1. Fit JAGS model
+jags.mod.phys <- fit_jags(y = y.phys, X = X.phys, jags.file = jags.file)
+
+# 2. Sample posterior distribution
+samples.phys <- sample_posterior(jags.mod = jags.mod.phys, iter = 5000)
+
+# 3. Get HPDI summary table
+bayesian_results.phys <- hpdi_summary(X = X.phys, samples = samples.phys)
+bayesian_results.phys %>%                                     # Display summary
+  knitr::kable(align = "ccc", caption = "")
+
+# DIAGNOSTICS
+# Determine if the support of the parameter space is explored well (more adaptations)
+#plot(samples.phys)
+gelman.plot(samples.phys)
+```
+
+```{r}
+# Aggregate physical quality of life score - Bayesian model implementation
+y.ment <- c(data.mod.ment$AGG_MENT_2Yr)
+X.ment <- model.matrix(
+  ~ AGG_MENT_BL + HardDrugUse + BMI + Age + HighBloodPressure + TreatmentAdherence + FrailtyRelatedPhenotype + Depressed + Income + SmokingStatus + DrinksPerWeek + Race,  
+  data = data.mod.ment)
+jags.file <- paste(getwd(), "BayesianCode/linMod.jags", sep = "/")
+
+# 1. Fit JAGS model
+jags.mod.ment <- fit_jags(y = y.ment, X = X.ment, jags.file = jags.file)
+
+# 2. Sample posterior distribution
+samples.ment <- sample_posterior(jags.mod = jags.mod.ment, iter = 5000)
+
+# 3. Get HPDI summary table
+bayesian_results.ment <- hpdi_summary(X = X.ment, samples = samples.ment)
+bayesian_results.ment %>%                                     # Display summary
+  knitr::kable(align = "ccc", caption = "")
+
+# DIAGNOSTICS
+# Determine if the support of the parameter space is explored well (more adaptations)
+#plot(samples.ment)
+gelman.plot(samples.ment)
+```
+
+## Merge Analyses
+```{r}
+# logVLOAD
+results_merged.vload <- dplyr::inner_join(bayesian_results.vload, lm_model_summary.vload) 
+results_merged.vload %>% knitr::kable(align = "cccccc", caption = "")
+
+# CD4+ T cell counts
+results_merged.leu3n <- dplyr::inner_join(bayesian_results.leu3n, lm_model_summary.leu3n)
+results_merged.leu3n %>% knitr::kable(align = "cccccc", caption = "")
+
+# Aggregate physical quality of life
+results_merged.phys <- dplyr::inner_join(bayesian_results.phys, lm_model_summary.phys)
+results_merged.phys %>% knitr::kable(align = "cccccc", caption = "")
+
+# Aggregate mental quality of life
+results_merged.ment <- dplyr::inner_join(bayesian_results.ment, lm_model_summary.ment)
+results_merged.ment %>% knitr::kable(align = "cccccc", caption = "")
+```
+
+## Hard Drug Effect on Primary Outcomes
+```{r}
+hard_drug.table <- rbind(
+  results_merged.vload %>% filter(Parameter == "HardDrugUseYes") %>% mutate(Parameter = "log(Viral Load)"),
+  results_merged.leu3n %>% filter(Parameter == "HardDrugUseYes") %>% mutate(Parameter = "CD4+ T Cell Count"),
+  results_merged.phys %>% filter(Parameter == "HardDrugUseYes") %>% mutate(Parameter = "Physical QOL Score"),
+  results_merged.ment %>% filter(Parameter == "HardDrugUseYes") %>% mutate(Parameter = "Mental QOL Score")
+) %>% rename("Primary Outcome" = "Parameter")
+
+hard_drug.table %>%
+  write.table(paste(getwd(), "/../Reports/FiguresTables/ModelEstimateTable.tsv", sep = ""), 
+              sep = "\t", row.names = T, col.names = NA)
+
+hard_drug.table %>% 
+  knitr::kable(align = "cccccc", 
+               caption = "Effect of hard drug use on 2-year treatment responses in Bayesian and Non-Bayesian regression models", 
+               col.names = c("Treatment Response", "$\\beta$-Estimate", "95% HPDI", "$\\beta$-Estimate", "95% CI", "p-value")) %>%
+  add_header_above(c(" " = 1L, "Bayesian Framework" = 2L, "Frequentist Framework" = 3L))
+  
+```
+
+
+
+## Limitations
+1. Hard drug status sometimes changes between baseline and 2yr
+2. Missing data is likely not missing completely at random

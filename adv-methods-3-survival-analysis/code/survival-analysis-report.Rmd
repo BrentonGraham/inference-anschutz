@@ -1,0 +1,475 @@
+---
+title: '10-Year Probability of Stroke from the Framingham Heart Study'
+author: |
+ | Analyst: Brenton Graham
+ | Report generated: `r format(Sys.Date(), '%m/%d/%Y')`
+bibliography: Project3_Citations.bib
+csl: nature.csl
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+require(readr)
+require(naniar)
+require(janitor)
+require(ggVennDiagram)
+require(survival)
+require(survminer)
+require(glmnet)
+require(tableone)
+require(knitr)
+require(kableExtra)
+require(magrittr)
+require(wesanderson)
+require(viridis)
+require(reshape2)
+require(mice)
+require(broom)
+require(ggpubr)
+require(ggh4x)
+require(selectiveInference)
+require(tidyverse)
+```
+
+```{r, echo=FALSE}
+# Import data
+data <- paste(getwd(), "frmgham2.csv", sep = "/") %>% 
+  read_delim(delim = ",") %>% # Read in csv
+  janitor::clean_names()      # Clean up feature names
+
+# Manipulate data to include only desirable covariates and 10yr of follow-up TTE data
+# Keeping this separate from filtering for period 1 to look at time-varying covariates
+data.cleanup <- data %>% 
+  # Censor if the stroke occurs after first 10 years of follow-up
+  mutate(
+    stroke_10yr = case_when(
+      timestrk >= 365.25*10 ~ 0,         # If timestrk > 10 years, censor stroke
+      timestrk < 365.25*10 ~ stroke      # Else leave as reported stroke 
+    ),
+  # Cap time to stroke to 10 years; only considering first 10 years of follow-up
+    timestrk_10yr = case_when(
+      timestrk >= 365.25*10 ~ 365.25*10, # If timestrk > 10 years, cap at 10 years
+      timestrk < 365.25*10 ~ timestrk    # Else leave as reported timestrk
+    ),
+  # Encode binary variables
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female")),
+  # Reducing the resolution of education to college/no college
+    educ = factor(case_when(
+      educ == 1 ~ "Less than High School",
+      educ == 2 ~ "High School or More",
+      educ == 3 ~ "High School or More",
+      educ == 4 ~ "High School or More")),
+    cursmoke = factor(cursmoke, levels = c(0, 1), labels = c("No", "Yes")),
+    diabetes = factor(diabetes, levels = c(0, 1), labels = c("No", "Yes")),
+    bpmeds = factor(bpmeds, levels = c(0, 1), labels = c("No", "Yes")),
+    prevchd = factor(prevchd, levels = c(0, 1), labels = c("No", "Yes")),
+    prevap = factor(prevap, levels = c(0, 1), labels = c("No", "Yes")),
+    prevmi = factor(prevmi, levels = c(0, 1), labels = c("No", "Yes")),
+    prevstrk = factor(prevstrk, levels = c(0, 1), labels = c("No", "Yes")),
+    prevhyp = factor(prevhyp, levels = c(0, 1), labels = c("No", "Yes"))
+  ) %>%
+  # Remove non-informative baseline variables and non-targeted events
+  dplyr::select(-c(time, death, angina, hospmi, mi_fchd, anychd, cvd, hyperten, 
+                   stroke, timeap, timemi, timemifc, timechd, timecvd, timedth, 
+                   timehyp, timestrk))
+
+# Select baseline covariates for analysis and enforce inclusion criteria
+data.10yr_followup <- data.cleanup %>%
+  # Baseline covariates
+  filter(period == 1) %>% select(-period) %>%
+  # Inclusion criteria: haven't had a stroke before
+  # 4434 -> 4402 subjects (32 subjects dropped)
+  filter(prevstrk == "No") %>% select(-prevstrk) %>%
+  # Remove variables selected during variable screening
+  dplyr::select(-c(randid, cigpday, diabp, hdlc, ldlc, totchol, glucose, prevap, prevmi))
+
+```
+
+# Introduction  
+The Framingham Heart Study is a multigenerational prospective cohort study that was initiated in 1948 to characterize risk factors associated with cardiovascular disease (CVD). Participants enrolled in the study have been examined biennially for clinical risk factors of CVD, including blood pressure, lung function, smoking history, and medication use, among other risk factors. CVD-related health outcomes such as incidence of stroke, myocardial infarction (i.e., heart attack), and heart failure have been tracked for all participants in the study along with time-to-event outcome measures. In this report, we focus on a subset of data from 4,434 participants of the Framingham Heart Study to identify sex-specific baseline risk factors associated with incidence of stroke. Further, we aim to estimate the 10-year probability of stroke associated with different risk profiles in this cohort. While we focus on baseline CVD risk factors for analysis in this report, we will also provide a high-level overview of how risk factors change over time (in relation to stroke incidence) and discuss how a time-varying covariate survival analysis might be of further interest.  
+
+# Methods 
+## Exploratory Data Analysis   
+Summary statistics and data visualizations were used to explore the relationship between baseline risk factors and 10-year incidence of stroke. Associations between continuous risk factors and 10-year incidence of stroke were visualized using density plots (Figure 1). Associations between categorical risk factors and 10-year incidence of stroke were visualized using compositional stacked bar plots (Figure 2). Subjects are stratified by sex and incidence of stroke during 10 years of follow-up in each figure.
+
+```{r, fig.dim=c(8, 3.1), fig.cap = "Distributions of continuous CVD risk factors at baseline stratified by sex and 10-year incidence of stroke."}
+# Figure 1 - Continuous risk factors at baseline and incidence of stroke
+data.10yr_followup %>%
+  select(sex, stroke_10yr, sysbp, bmi, age, heartrte) %>%
+  pivot_longer(cols = c(sysbp:heartrte), names_to = "predictor") %>%
+  mutate(predictor = case_when(
+    predictor == "sysbp" ~ "Systolic blood pressure",
+    predictor == "bmi" ~ "Body mass index",
+    predictor == "age" ~ "Age",
+    predictor == "heartrte" ~ "Heart rate"),
+    predictor = factor(predictor, levels = c("Systolic blood pressure", "Body mass index", "Age", "Heart rate")),
+    stroke_10yr = factor(stroke_10yr, levels = c(0, 1), labels = c("Censored", "Stroke"))) %>%
+  ggplot(aes(x = value)) +
+    geom_density(aes(color = factor(stroke_10yr)), lwd = 1.2, alpha = 0.5) +
+    ggh4x::facet_grid2(sex ~ predictor, scales = "free", independent = "y") +
+    scale_color_manual(values = c("gray15", "darkgoldenrod")) +
+    labs(x = "Risk Factor Values") +
+    guides(color = guide_legend(title = "10 Years of Follow-Up")) +
+    theme_bw() +
+    theme(axis.title = element_text(size = 10),
+          strip.text.x = element_text(size = 9),
+          panel.grid.minor = element_blank(),
+          axis.ticks.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.title.y = element_blank(),
+          legend.position = "bottom",
+          legend.title = element_text(size = 10))
+
+```
+
+```{r, fig.dim=c(8.5, 4), fig.cap = "Comparison of categorical CVD risk factors at baseline stratified by sex and 10-year incidence of stroke."}
+# Figure 2 - Continuous risk factors at baseline and incidence of stroke
+data.10yr_followup %>%
+  select(sex, stroke_10yr, prevchd, prevhyp, bpmeds, diabetes, cursmoke) %>%
+  drop_na() %>%
+  pivot_longer(cols = c(prevchd:cursmoke), names_to = "predictor") %>%
+  mutate(predictor = case_when(
+    predictor == "prevchd" ~ "Prevalent CHD",
+    predictor == "prevhyp" ~ "Hypertension",
+    predictor == "bpmeds" ~ "Blood pressure medication",
+    predictor == "diabetes" ~ "Diabetes",
+    predictor == "cursmoke" ~ "Cigarette smoking"),
+    stroke_10yr = factor(stroke_10yr, levels = c(0, 1), labels = c("Censored", "Stroke"))) %>%
+  ggplot(aes(x = stroke_10yr, fill = value)) +
+    geom_bar(position = "fill") +
+    facet_grid(sex ~ predictor) +
+    scale_y_continuous(breaks = c(0, 0.5, 1)) +
+    scale_fill_manual(values = wes_palette("Royal1")) +
+    labs(x = "Stroke in 10-Year Follow-Up", y = "Proportion of Subjects") +
+    guides(fill = guide_legend(title = "Risk Factor Binary Value")) +
+    theme_bw() +
+    theme(strip.text.x = element_text(size = 8), 
+          axis.title.y = element_text(size = 10),
+          legend.position = "bottom")
+```
+
+## Data Preparation
+The original data set was filtered to contain only baseline CVD risk factors. Subjects with a history of stroke (32 subjects) were excluded from analysis. Time-to-event data were manipulated to reflect 10 years follow-up (rather than the 24 years of follow-up that are available in the data set) since we are interested in estimating 10-year probability of stroke. First, stroke events occurring after 10 years of follow-up were censored (i.e., set to non-events). Second, time-to-stroke measures were restricted to a maximum of 10 years. Death is treated as a censoring event throughout the analysis, whereby time-to-death is used as time-to-event follow-up time. 
+
+## Variable Screening
+Predictor variables were screened for redundancy, collinearity, missingness, and biological relevance. Predictor exclusion and exclusion rationale is described below.  
+
+- $\textbf{Cigarette smoking. }$ The original data set included variables for both current smoking status and daily cigarette consumption. We prefer current smoking status as an indicator of cigarette smoking since there are missing data associated with daily cigarette consumption measurements.  
+
+- $\textbf{Blood pressure. }$ We observe a strong correlation between systolic blood pressure (SBP) and diastolic blood pressure (DBP) in this data set (Pearson's $r = 0.79$), which could lead to issues with collinearity. This positive association is well reported throughout CVD literature[@citation1]. Reports suggest SBP to be the better predictor of CVD-related events[@citation2]. As such, DBP is excluded as a predictor in our models.  
+
+- $\textbf{Cholesterol. }$ Total, high-density lipoprotein (HDL), and low-density lipoprotein (LDL) cholesterol variables were included in the original data set. However, HDL and LDL cholesterol measurements were not taken at baseline (i.e., these variables are completely missing for time point 1). Total cholesterol measurements become biologically obsolete when HDL and LDL cholesterol proportions are unknown. All cholesterol variables are therefore excluded from analysis.  
+
+- $\textbf{Glucose. }$ A casual serum glucose variable is included in the data set. This variable is associated with more missingness than any other predictor in the data set (with 9% of participants missing measurements). The data set contains a separate variable which denotes diabetic and non-diabetic subjects and is partially derived from the glucose measurements (i.e., subjects with a casual serum glucose level over 200 mg/dL are considered diabetic). The glucose variable is excluded from analysis since similar information is contained within the diabetes marker and since the diabetes marker is available for all participants. Glucose levels are confirmed to be significantly different between diabetic and non-diabetic participants ($p < 0.001$).  
+
+- $\textbf{Prevalent CHD, MI and AP. }$ The data set contains separate markers for prevalent coronary heart disease (CHD), myocardial infarction (MI), and angina pectoris (AP). The prevalent CHD marker was found to encompass information from each of the other markers, and is used as a single indicator of pre-existing MI, AP, or coronary instability in our models.  
+
+Following variable screening we are left with 10 potential predictors of stroke incidence. These include age, SBP, cigarette smoking status, body mass index (BMI), heart rate, diabetes diagnosis, use of blood pressure medication, prevalent CHD, prevalent hypertension, and education status (binarized into less than high school degree or high school degree or more).
+
+
+## Missing Data
+Missing data were present in 190 observations (4.3%) after variable selection; 83 of which were male (4.3% of all males) and 107 of which were female (4.2% of all females). Missing entries were determined to not be missing completely at random (MCAR) by Little's MCAR hypothesis test ($p < 0.001$). Nonetheless, we decided to move forward with a complete-case analysis due to time constraints. Limitations to this approach will be discussed in the limitations section.
+
+## Statistical Modeling
+Statistical modeling was performed separately for male and female subjects in this study. Regularized Cox proportional hazards (CPH) models were fit using the LASSO ($L_1$) penalty for variable selection. Briefly, LASSO regression requires specification of a $\lambda$ penalization hyperparameter which determines the extent of regularization. The optimal $\lambda$ value was determined for each sex-specific model through $K$-fold cross-validation using 5-folds. The selected value of lambda corresponded to the minimal value of lambda (i.e., least penalization) that maximized Harrell's C-index. $\lambda$ values of 0.00193 and 0.00241 were used for the male- and female-specific models, respectively. Separate CPH models were also fit without regularization as an exploratory way to assess shrinkage. Proportional hazards assumptions were confirmed for all Cox regression models using the `cox.zph` hypothesis test from the `survival` package in R. 
+
+Following model fitting, LASSO-based models were used to group individuals into three groups of stroke-related risk profiles, including low-, medium- and high-risk groups. Risk groups were characterized following a method proposed by Witten and Tibshirani (2010)[@citation3]. Briefly, risk scores were computed for each subject from subject-specific covariates and the coefficient estimates from the fitted proportional hazards models. Subjects were then broken into equally-sized low-, medium- and high-risk groups based on risk score. Finally, Kaplan-Meier curves were fit to the risk group categories and $p$-values were used to measure how well risk groups are stratified in the model. A stringent significance value of $\alpha = 0.01$ is used throughout analysis to guard against Type-I errors that might arise from multiple comparisons.  
+
+# Results
+Table 1 describes the demographics and baseline risk factors of the study population that remained following data preparation, variable screening and complete-case selection. The table is stratified by sex and incidence of stroke to highlight the imbalanced proportion of subjects who experienced a stroke during the 10-year follow-up period. Certain risk factors are clearly imbalanced between the male and female populations, including cigarette smoking, which further supports the rationale of using a sex-stratified analysis.  
+
+\newpage
+
+```{r, echo = FALSE}
+# Table 1 (source: https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html)
+vars <- c("age", "bmi", "sysbp", "heartrte", "cursmoke", "diabetes", "bpmeds", "prevchd", "prevhyp", "educ")
+cat_vars <- c("cursmoke", "diabetes", "bpmeds", "prevchd", "prevhyp", "educ")
+table1 <- CreateTableOne(vars = vars, factorVars = cat_vars, strata = c("stroke_10yr", "sex"), 
+                         data = data.10yr_followup %>% drop_na())
+print(table1, print = F, nonnormal = T, minMax = F, contDigits=0) %>% 
+  as.data.frame() %>% 
+  select(-test, -p) %>%
+  set_rownames(c("n", "Age (years)", "Body Mass Index (kg/m^2)", 
+                 "Systolic Blood Pressure (mean mm Hg)", "Heart Rate (beats/min)", 
+                 "Cigarette Smoker", "Diabetic", "Using Blood Pressure Medication", 
+                 "Prevalent Coronary Heart Disease", "Prevalent Hypertension", 
+                 "Education (Less than High School)")) %>%
+  knitr::kable(caption = "Cohort demographics stratified by sex and 10-year incidence of stroke",
+               booktabs = T, align = "ccccc", col.names = NULL) %>%
+  add_header_above(c("Risk Factor" = 1L, "Censored" = 1L, "Stroke" = 1L, "Censored" = 1L, "Stroke" = 1L)) %>%
+  add_header_above(c(" " = 1L, "Male" = 2L, "Female" = 2L)) %>%
+  footnote(general = "Note: Continuous variables are reported as median [IQR]. Categorical variables are reported as n, (%).",
+           general_title = "")
+```
+
+<br>
+
+Hazard ratio estimates from both $L_1$-regularized and non-regularized Cox proportional hazards models are shown in Table 2. As mentioned, estimates and significance values from the non-regularized models were solely computed to provide a perspective on the shrinkage effect of the LASSO; these estimates will not be used for inference in this report. Standard tools of frequentist statistical inference including confidence intervals and $p$-values are not applicable (at least yet) to LASSO-based model estimates.  
+
+In the male-specific model, age, use of blood pressure medication, cigarette smoking, diabetes, education, prevalent hypertension, and systolic blood pressure are all identified as potentially useful predictors of 10-year stroke incidence. Diabetics are associated with a hazard ratio estimate of 4.18, indicating that males who are diagnosed as diabetic at baseline are 4.18 times more likely to experience a stroke over 10 years of follow-up than males who are not diagnosed as diabetic (controlling for all other covariates). In the female-specific model, age, use of blood pressure medication, cigarette smoking, diabetes, prevalent hypertension, and systolic blood pressure were again selected as potentially useful predictors of 10-year stroke incidence. Heart rate and prevalent CHD, which were not selected in the male-specific model, were additionally selected in this model. BMI was selected in neither circumstance. Age and systolic blood pressure are positively associated with 10-year hazard of stroke and return identical estimates in both the male and female models. C-statistics of 0.776 and 0.799 were achieved by the male- and female-specific models, respectively, indicating good predictive performance in each.  
+
+<br>
+
+```{r, include=FALSE, echo=FALSE}
+# ----------------------------------MALE----------------------------------------
+# The LASSO
+testData.male <- data.10yr_followup %>%
+  filter(sex == "Male") %>% dplyr::select(-sex) %>%
+  drop_na()
+
+# Select covariates for X and time/status for y
+# X: Model.matrix -> create dummy variables; y: survival object
+X.male <- model.matrix(~ . - 1, testData.male %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  # Removing extra column for currently smoke = No; not sure why this is present
+  as.data.frame() %>% select(-"cursmokeNo") %>% as.matrix()
+y.male <- Surv(time = testData.male$timestrk_10yr, event = testData.male$stroke_10yr)
+
+# 5-fold CV for lambda selection
+# No need to re-fit the model with the optimal lambda; can pull coefficients directly
+set.seed(0)
+cvfit.male <- cv.glmnet(X.male, y.male, family = "cox", type.measure = "C", nfolds = 5)
+lambda.male <- cvfit.male$lambda.min
+mse.male <- cvfit.male$cvm[cvfit.male$lambda == cvfit.male$lambda.min]
+cvfit.male
+
+# Summarize coefficients
+lasso_coef.male <- exp(as.matrix(coef(cvfit.male, s = "lambda.min"))) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames("HR.male_lasso") %>%
+  round(2) %>%
+  mutate(HR.male_lasso = ifelse(HR.male_lasso == 1, "-", paste(sprintf("%.2f", HR.male_lasso))))
+
+# Non-regularized model Cox PH model
+coxph_coef.male <- coxph(y.male ~ ., data = testData.male %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE, conf.level = 0.95) %>% 
+  as.data.frame() %>% 
+  select(-c(std.error, statistic)) %>%
+  column_to_rownames("term") %>% 
+  # Format with two decimals
+  mutate(HR.male_estimate = paste(sprintf("%.2f", estimate), " (", sprintf("%.2f", conf.low), ", ", sprintf("%.2f", conf.high), ")", sep = ""),
+         sig.male = case_when(
+           p.value > 0.05 ~ "",
+           (p.value <= 0.05 & p.value > 0.01) ~ "*",
+           (p.value <= 0.01 & p.value > 0.001) ~ "**",
+           p.value <= 0.001 ~ "***"),
+         p.value.male = paste(format.pval(p.value, eps = .001, digits = 1), sig.male, sep = "")) %>%
+  select(HR.male_estimate, p.value.male)
+
+# Male results table
+model_results.male <- lasso_coef.male %>%
+  merge(coxph_coef.male, by = "row.names") %>% 
+  column_to_rownames("Row.names")
+
+# ---------------------------------FEMALE---------------------------------------
+# The LASSO
+testData.female <- data.10yr_followup %>%
+  filter(sex == "Female") %>% dplyr::select(-sex) %>%
+  drop_na()
+
+# Select covariates for X and time/status for y
+# X: Model.matrix -> create dummy variables; y: survival object
+X.female <- model.matrix(~ .-1, testData.female %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  # Removing extra column for currently smoke = No; not sure why this is present
+  as.data.frame() %>% select(-"cursmokeNo") %>% as.matrix()
+y.female <- Surv(time = testData.female$timestrk_10yr, event = testData.female$stroke_10yr)
+
+# 5-fold CV for lambda selection
+# No need to re-fit the model with the optimal lambda; can pull coefficients directly
+set.seed(0)
+cvfit.female <- cv.glmnet(X.female, y.female, family = "cox", type.measure = "C", nfolds = 5)
+lambda.female <- cvfit.female$lambda.min
+mse.female <- cvfit.female$cvm[cvfit.female$lambda == cvfit.female$lambda.min]
+cvfit.female
+
+# Summarize coefficients
+lasso_coef.female <- exp(as.matrix(coef(cvfit.female, s = "lambda.min"))) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames("HR.female_lasso") %>%
+  round(2) %>%
+  mutate(HR.female_lasso = ifelse(HR.female_lasso == 1, "-", paste(sprintf("%.2f", HR.female_lasso))))
+
+# Non-regularized model Cox PH model 
+coxph_coef.female <- coxph(y.female ~ ., data = testData.female %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  broom::tidy(exponentiate = TRUE, conf.int = TRUE, conf.level = 0.95) %>% 
+  as.data.frame() %>% 
+  select(-c(std.error, statistic)) %>%
+  column_to_rownames("term") %>% 
+  # Format with two decimals
+  mutate(HR.female_estimate = paste(sprintf("%.2f", estimate), " (", sprintf("%.2f", conf.low), ", ", sprintf("%.2f", conf.high), ")", sep = ""),
+         sig.female = case_when(
+           p.value > 0.05 ~ "",
+           (p.value <= 0.05 & p.value > 0.01) ~ "*",
+           (p.value <= 0.01 & p.value > 0.001) ~ "**",
+           p.value <= 0.001 ~ "***"),
+         p.value.female = paste(format.pval(p.value, eps = .001, digits = 1), sig.female, sep = "")) %>%
+  select(HR.female_estimate, p.value.female)
+
+# Female results table
+model_results.female <- lasso_coef.female %>%
+  merge(coxph_coef.female, by = "row.names") %>% 
+  column_to_rownames("Row.names")
+
+# -------------------------------ALL RESULTS------------------------------------
+model_results <- model_results.male %>%
+  merge(model_results.female, by = "row.names") %>%
+  column_to_rownames("Row.names")
+
+```
+
+```{r, echo = F, include = F}
+# Check proportional hazards assumptions for each model
+# LASSO resource: https://stats.stackexchange.com/questions/577318/assessing-violations-of-the-cox-proportional-hazards-assumptions
+# Male - LASSO, global test; init specifies coefficients, iter.max forces software to keep these values
+coxph(y.male ~ X.male, init = as.numeric(coef(cvfit.male, s = "lambda.min")), iter.max = 0) %>%
+  cox.zph()
+
+# Male - no regularization
+coxph(y.male ~ ., data = testData.male %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  cox.zph()
+
+# Female - LASSO, global test
+coxph(y.female ~ X.female, init = as.numeric(coef(cvfit.female, s = "lambda.min")), iter.max = 0) %>%
+  cox.zph()
+
+# Female - no regularization
+coxph(y.female ~ ., data = testData.female %>% dplyr::select(-c(timestrk_10yr, stroke_10yr))) %>%
+  cox.zph()
+```
+
+```{r}
+model_results %>%
+  set_rownames(c("Age", "BMI", "Using B.P. Meds", "Cigarette Smoker", 
+                 "Diabetic", "Education (< H.S.)", "Heart Rate", "Prev CHD", 
+                 "Prev Hypertension", "Systolic B.P.")) %>%
+  knitr::kable(caption = "Model estimates from Cox proportional hazards models with and without the LASSO",
+               booktabs = T, align = "cccccc", col.names = NULL) %>%
+  kable_styling(latex_options = "hold_position") %>%
+  add_header_above(c("Risk Factor" = 1L, "HR" = 1L, "HR" = 1L, "p-value" = 1L, "HR" = 1L, "HR" = 1L, "p-value" = 1L)) %>%
+  add_header_above(c(" " = 1L, "LASSO-CPH" = 1L, "Cox PH" = 2L, "LASSO-CPH" = 1L, "Cox PH" = 2L)) %>%
+  add_header_above(c(" " = 1L, "Male Models" = 3L, "Female Models" = 3L))
+```
+
+\newpage
+
+```{r}
+# Stratify male subjects by risk score (Witten and Tibshirani 2010)
+# Resource: https://longjp.github.io/survival/lectures/07prediction.html 
+
+# ----------------------------------MALE----------------------------------------
+# Get predictions x^Tbeta
+preds.male <- predict(cvfit.male, X.male, s = "lambda.min")
+
+# Split participants into low, medium and high risk
+risk_profiles.raw.male <- cut_number(preds.male, 3)
+risk_profiles.male <- factor(
+  risk_profiles.raw.male, levels = c("[4.15,5.45]", "(5.45,6.32]", "(6.32,9.76]"),
+  labels = c("Low", "Medium", "High"))
+
+# Kaplan-Meier curve by risk profile
+survfit.risk_profiles.male <- survfit(y.male ~ risk_profiles.male)
+male.risk_plot <- ggsurvplot(
+  fit = survfit.risk_profiles.male,
+  data = testData.male,
+  surv.median.line = "hv",
+  size = 1,
+  palette = c("#2E9FDF", wes_palette("Royal1")[1], wes_palette("Royal1")[2]),
+  conf.int = TRUE,
+  pval = TRUE, pval.coord = c(100, 0.92), pval.size = 4,
+  risk.table = TRUE, risk.table.col = "strata", risk.table.height = 0.32,
+  fontsize = 3,
+  legend.labs = c("Low", "Medium", "High"), legend.title = "Male Risk Profile",
+  xlim = c(0, 365.25*10), ylim = c(0.9, 1), xscale = "d_y", break.time.by = 365.25*2,
+  xlab = "Time (Years)", ylab = "Survival Probability",
+  ggtheme = theme_bw())
+
+# Merge risk groups to data frame and show table 1-esque table
+risk_profiles.male.DF <- cbind(preds.male, as.character(risk_profiles.male)) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("Risk Prediction", "Risk Profile")) %>%
+  merge(X.male, by = "row.names") %>%
+  select(-c(bmi, cursmokeYes, heartrte, prevchdYes, Row.names))
+
+# ---------------------------------FEMALE---------------------------------------
+# Get predictions x^Tbeta
+preds.female <- predict(cvfit.female, X.female, s = "lambda.min")
+
+# Split participants into low, medium and high risk
+risk_profiles.raw.female <- cut_number(preds.female, 3)
+risk_profiles.female <- factor(
+  risk_profiles.raw.female, levels = c("[2.78,4.03]", "(4.03,4.94]", "(4.94,8.78]"),
+  labels = c("Low", "Medium", "High"))
+
+# Kaplan-Meier curve by risk profile
+survfit.risk_profiles.female <- survfit(y.female ~ risk_profiles.female)
+female.risk_plot <- ggsurvplot(
+  fit = survfit.risk_profiles.female,
+  data = testData.female,
+  surv.median.line = "hv",
+  size = 1,
+  palette = c("#2E9FDF", wes_palette("Royal1")[1], wes_palette("Royal1")[2]),
+  conf.int = TRUE,
+  pval = TRUE, pval.coord = c(100, 0.92), pval.size = 4,
+  risk.table = TRUE, risk.table.col = "strata", risk.table.height = 0.32,
+  fontsize = 3,
+  legend.labs = c("Low", "Medium", "High"), legend.title = "Female Risk Profile",
+  xlim = c(0, 365.25*10), ylim = c(0.9, 1), xscale = "d_y", break.time.by = 365.25*2,
+  xlab = "Time (Years)", ylab = "Survival Probability",
+  ggtheme = theme_bw())
+
+# Merge risk groups to data frame and show table 1-esque table
+risk_profiles.female.DF <- cbind(preds.female, as.character(risk_profiles.female)) %>%
+  as.data.frame() %>%
+  magrittr::set_colnames(c("Risk Prediction", "Risk Profile")) %>%
+  merge(X.female, by = "row.names") %>%
+  select(-c(bmi, cursmokeYes, heartrte, prevchdYes, Row.names))
+```
+```{r, fig.dim=c(8.5, 4), fig.cap = "Kaplan-Meier 10-year survival curves stratified by risk profile."}
+# Display Kaplan-Meier curves
+survplots <- list(male.risk_plot, female.risk_plot)
+arrange_ggsurvplots(survplots, print = TRUE, ncol = 2, nrow = 1, risk.table.height = 0.3)
+```
+
+
+<br>
+
+As discussed, LASSO-based models were used categorize subjects into three risk group levels (low-, medium-, and high-risk of stroke incidence during 10-year follow-up) based on model-computed risk scores. Figure 3 shows the Kaplan-Meier 10-year survival curves that were fit and stratified using these risk set groups. Separation is observed between survival curves for each risk group ($p < 0.001$), with the lowest survival probability (i.e., highest probability of stroke) corresponding to the high-risk group. The 10-year probabilities of remaining uncensored and without stroke incidence for the low-, medium-, and high-risk groups are displayed in Table 3.  
+
+```{r}
+# Present results
+surv_sum.male <- summary(survfit.risk_profiles.male, times = 365.25*10)
+surv_sum.female <- summary(survfit.risk_profiles.female, times = 365.25*10)
+
+surv_sum.DF.male <- data.frame(
+  "prob_stroke.male" = round(1-surv_sum.male$surv, 4)*100,
+  "ci_low.male" = round(1-surv_sum.male$upper, 4)*100,
+  "ci_high.male" = round(1-surv_sum.male$lower, 4)*100) %>%
+  mutate(prob_stroke.male = paste(sprintf("%.2f", prob_stroke.male), "% (", sprintf("%.2f", ci_low.male), ", ", sprintf("%.2f", ci_high.male), ")", sep = "")) %>%
+  select(prob_stroke.male)
+  
+surv_sum.DF.female <- data.frame(
+  "prob_stroke.female" = round(1-surv_sum.female$surv, 4)*100,
+  "ci_low.female" = round(1-surv_sum.female$upper, 4)*100,
+  "ci_high.female" = round(1-surv_sum.female$lower, 4)*100) %>%
+  mutate(prob_stroke.female = paste(sprintf("%.2f", prob_stroke.female), "% (", sprintf("%.2f", ci_low.female), ", ", sprintf("%.2f", ci_high.female), ")", sep = "")) %>%
+  select(prob_stroke.female)
+
+cbind(surv_sum.DF.male, surv_sum.DF.female) %>%
+  magrittr::set_rownames(c("Low-Risk", "Medium-Risk", "High-Risk")) %>%
+  knitr::kable(caption = "10-year probability of stroke incidence stratified by sex and risk group",
+               booktabs = T, align = "cccccc", col.names = c("Male 10-Yr Prob of Stroke (95% CI)", "Female 10-Yr Prob of Stroke (95% CI)"))
+```
+
+# Discussion & Limitations  
+Results from this analysis suggest that 10-year probability of stroke incidence is associated with at least a few important CVD risk factors, and that these risk factors may vary between male and female subjects. The most influential risk factors of 10-year stroke appear to be baseline age, systolic blood pressure, and prevalent hypertension for both male and female subjects. Baseline diabetes status has a clear association with increased hazard of stroke incidence in male subjects.  
+
+While results are promising and appear to be consistent with the literature, limitations to this analysis are prevalent. First, a complete-case analysis was used for statistical modeling even though missing data were determined to not be MCAR. Future renditions of this study ought to use a multiple imputation approach for missing data handling and a sensitivity analysis should be performed to test for bias in our estimates. Second, the LASSO is known to produce biased estimators. It is therefore not recommended to depend on reported estimators for statistical inference in this report. Third, the LASSO is also known to produce unstable variable selection iteration-to-iteration and sample-to-sample. In other words, variables selected in our models are not guaranteed to be selected in models that are fit on a sub-sample of our population. A variable selection stability analysis, perhaps using a bootstrap approach, should be explored to assess which variables are consistently selected as predictors of 10-year stroke incidence. Fourth, risk scores and corresponding risk profile groupings were computed using a LASSO-based Cox PH model that was trained on all available data. Therefore, the generalizability of these results should be questioned. Future analyses should use a training and validation set approach to test the generalizability of risk score predictions. Fifth, and finally, results from our study are restricted to baseline risk factors, while time-varying risk factors are likely more accurate predictors of stroke incidence. Further reports ought to explore the use of mixed effects Cox regression to assess this.  
+
+\newpage
+
+# Citations

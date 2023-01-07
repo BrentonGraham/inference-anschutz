@@ -1,0 +1,485 @@
+---
+title: 'Project 3 Interim Analysis Plan'
+author: |
+ | Analyst: Brenton Graham
+ | Report generated: `r format(Sys.Date(), '%m/%d/%Y')`
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document
+urlcolor: blue
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message = F, warning = F)
+require(tidyverse)
+require(readr)
+require(naniar)
+require(janitor)
+require(ggVennDiagram)
+require(survival)
+require(survminer)
+require(glmnet)
+require(tableone)
+require(knitr)
+require(kableExtra)
+require(magrittr)
+require(wesanderson)
+require(viridis)
+require(reshape2)
+require(mice)
+require(broom)
+require(ggpubr)
+require(GGally)
+```
+
+```{r, echo=FALSE}
+# Import data
+data <- paste(getwd(), "frmgham2.csv", sep = "/") %>% 
+  read_delim(delim = ",") %>% # Read in csv
+  janitor::clean_names()      # Clean up feature names
+
+# Manipulate data to include only desirable covariates and 10yr of follow-up TTE data
+# Keeping this separate from filtering for period 1 to look at time-varying covariates
+data.cleanup <- data %>% 
+  # Censor if the stroke occurs after first 10 years of follow-up
+  mutate(
+    stroke_10yr = case_when(
+      timestrk >= 365*10 ~ 0,      # If timestrk > 10 years, censor stroke
+      timestrk < 365*10 ~ stroke   # Else leave as reported stroke 
+    ),
+  # Cap time to stroke to 10 years; only considering first 10 years of follow-up
+    timestrk_10yr = case_when(
+      timestrk >= 365*10 ~ 3650,   # If timestrk > 10 years, cap at 10 years
+      timestrk < 365*10 ~ timestrk # Else leave as reported timestrk
+    ),
+  # Encode binary variables
+    sex = factor(sex, levels = c(1, 2), labels = c("Male", "Female")),
+  # Reducing the resolution of education to college/no college
+    educ = factor(case_when(
+      educ == 1 ~ "Less than College Degree",
+      educ == 2 ~ "Less than College Degree",
+      educ == 3 ~ "Less than College Degree",
+      educ == 4 ~ "College Degree +")),
+    cursmoke = factor(cursmoke, levels = c(0, 1), labels = c("No", "Yes")),
+    diabetes = factor(diabetes, levels = c(0, 1), labels = c("No", "Yes")),
+    bpmeds = factor(bpmeds, levels = c(0, 1), labels = c("No", "Yes")),
+    prevchd = factor(prevchd, levels = c(0, 1), labels = c("No", "Yes")),
+    prevap = factor(prevap, levels = c(0, 1), labels = c("No", "Yes")),
+    prevmi = factor(prevmi, levels = c(0, 1), labels = c("No", "Yes")),
+    prevstrk = factor(prevstrk, levels = c(0, 1), labels = c("No", "Yes")),
+    prevhyp = factor(prevhyp, levels = c(0, 1), labels = c("No", "Yes"))
+  ) %>%
+  # Remove non-informative baseline variables and non-targeted events
+  # HDLC/LDLC: baseline data not available (i.e., only period 3 data available)
+  select(-c(hdlc, ldlc, time, death, angina, hospmi, mi_fchd, anychd, cvd, hyperten, 
+            stroke, timeap, timemi, timemifc, timechd, timecvd, timedth, timehyp, timestrk))
+
+# Select baseline covariates for analysis and enforce inclusion criteria
+data.10yr_followup <- data.cleanup %>%
+  # Baseline covariates
+  filter(period == 1) %>% select(-period) %>%
+  # Inclusion criteria: haven't had a stroke before
+  # 4434 -> 4402 subjects (32 subjects dropped)
+  filter(prevstrk == "No") %>% select(-prevstrk)
+```
+
+# Introduction  
+The Framingham Heart Study is a multigenerational prospective cohort study that was initiated in 1948 to characterize risk factors associated with cardiovascular disease (CVD). Participants enrolled in the study have been examined biennially for clinical risk factors of CVD, including blood pressure, lung function, smoking history, and medication use, among other risk factors. CVD-related health outcomes such as incidence of stroke, myocardial infarction (i.e., heart attack), and heart failure have been tracked for all participants in the study along with time-to-event outcome measures. In this report, we focus on a subset of data from 4,434 participants of the Framingham Heart Study to identify sex-specific baseline risk factors associated with incidence of stroke. Further, we aim to estimate the 10-year probability of stroke associated with different risk profiles in this cohort. While we focus on baseline CVD risk factors for analysis in this report, we will also provide a high-level overview of how risk factors change over time (in relation to stroke incidence) and discuss how a time-varying covariate survival analysis might be of further interest.  
+
+# Exploratory Data Analysis   
+Descriptive statistics will be provided to understand potential differences in baseline risk factors for those who do and do not experience stroke in the first 10 years of follow-up. Kaplan-Meier curves will be used to visually show differences in 10-year probability of stroke when the cohort is stratified by baseline risk factors. An example of this is shown in Figure 1, where *survival* probability is stratified by prevalence of hypertension at baseline. Note that no additional covariates are adjusted for in this curve, and the visual shown here should not to be used for inference.  
+
+```{r, echo=F, fig.dim=c(4.5, 2.5), fig.cap="Kaplan-Meier curve example."}
+# Fit survival curve based on 
+survival_mod <- survfit(Surv(timestrk_10yr, stroke_10yr) ~ prevhyp, data = data.10yr_followup)
+ggsurvplot(data = data.10yr_followup, fit = survival_mod, xlab = "Day", 
+           ylab = "Survival Probability", palette = c("#221D23", "#DDB967"),
+           font.x = c(10), font.y = c(10), font.tickslab = c(10), 
+           risk.table = TRUE, tables.height = 0.30, pval = TRUE, conf.int = TRUE, 
+           surv.median.line = "hv", censor = TRUE, xlim = c(0, 365*10), ylim = c(0.8, 1))
+```
+
+```{r}
+# Stroke vs no stroke
+data.10yr_followup %>%
+  select(sex, stroke_10yr, sysbp, diabp, bmi, heartrte, totchol) %>%
+  pivot_longer(cols = c(sysbp:totchol), names_to = "predictor") %>%
+  mutate(predictor = case_when(
+    predictor == "sysbp" ~ "Systolic BP (mm Hg)",
+    predictor == "diabp" ~ "Diastolic BP (mm Hg)",
+    predictor == "bmi" ~ "Body Mass Index",
+    predictor == "heartrte" ~ "Heart Rate (Beats/Min)",
+    predictor == "totchol" ~ "Total Cholesterol"),
+    stroke_10yr = factor(stroke_10yr, levels = c(0, 1), labels = c("No Stroke", "Stroke"))) %>%
+  ggplot(aes(x = value)) +
+    geom_density(aes(color = factor(stroke_10yr)), lwd = 1.2, alpha = 0.5) +
+    facet_grid(sex ~ predictor, scales = "free") +
+    scale_color_manual(values = wes_palette("Royal1")) +
+    scale_y_continuous(name = "Density", limits = c(0, 0.125), breaks = c(0, 0.05, 0.10)) +
+    labs(x = "Predictor Values") +
+    guides(color = guide_legend(title = "10 Years of Follow-Up")) +
+    theme_bw() +
+    theme(axis.title = element_text(size = 10),
+          strip.text.x = element_text(size = 8),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.title = element_text(size = 10))
+```
+
+# Data Preparation
+Baseline risk factors, or clinical measurements that were taken before follow-up, are used as predictors of stroke incidence in the primary analysis. Time-to-event data were manipulated to reflect 10 years follow-up (rather than the 24 years of follow-up that are available in the data set) since we are interested in estimating 10-year probability of stroke. First, stroke events occurring after 10 years of follow-up were censored, or set to non-events. Second, time-to-stroke measures were restricted to a maximum of 10 years. Death was treated as a censoring event throughout the analysis, whereby time-to-death was used as time-to-event follow-up time.
+
+# Missing Data
+Missing risk factor data are present in the data set as shown in Figure 2. A simple imputation method, such as next observation carried backward (NOCB) or mean/median imputation, will be used to address the missingness.  
+
+```{r, echo=FALSE, fig.dim=c(8, 3), fig.cap="Baseline missingness."}
+# Baseline data missingness
+# Covariates with missing data: totchol, bmi, bpmeds, heartrte, glucose, educ
+data.10yr_followup %>% naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+```
+
+```{r}
+# MCAR test - Result: Data are not MCAR (p < 0.001)
+data.10yr_followup %>% mcar_test()
+```
+
+# Variable Screening
+## Multicollinearity
+### Continous vs Continuous Predictors
+There is a strong correlation between systolic blood pressure and diastolic blood pressure.
+```{r, out.width = '60%'}
+# Pearson correlation matrix
+data.collinearity_check <- data.10yr_followup %>% select(-c(randid, timestrk_10yr))
+data.collinearity_check %>%
+  select(where(is.numeric), -stroke_10yr) %>%
+  drop_na() %>%
+  cor(use = "complete.obs") %>%
+  round(digits = 3) %>%
+  reshape2::melt() %>%
+  ggplot(aes(x=Var1, y=Var2, fill = value)) +
+    geom_tile() +
+    geom_text(aes(Var2, Var1, label = value), size = 3, color = "white") +
+    labs(x = "", y = "") +
+    scale_fill_viridis() +
+    theme_bw()
+```
+
+### Systolic vs Diastolic Blood Pressure
+The literature suggests that systolic blood pressure is the better predictor of future cardiovascular events and death across all age groups. Diastolic blood pressure provides additional predictive information for younger patients, but is not as informative for patients over a certain age.  
+```{r, out.width = '60%'}
+data.collinearity_check %>%
+  mutate(pulse_pressure = sysbp - diabp) %>%
+  select(age, sysbp, diabp, pulse_pressure) %>%
+  ggpairs(aes(alpha = 0.1)) +
+  theme_bw()
+```
+
+### Categorical vs Categorical Predictors
+Looking at the data document, we suspect that prevalent coronary heart disease encompasses prevalent angina pectoris and myocardial infarction. 
+```{r, out.width = '60%'}
+# Chi-squared tests to check multicollinearity between categorical variables
+# Extract categorical variables
+factor_data <- data.collinearity_check %>%
+  select(where(is.factor)) %>%
+  drop_na()
+
+# Pairwise chi-squared test
+outer(factor_data, factor_data, Vectorize(\(x, y) chisq.test(table(x, y), sim=TRUE)$p.value)) %>%
+  round(2) %>%
+  reshape2::melt() %>%
+  ggplot(aes(x=Var1, y=Var2, fill = value)) +
+    geom_tile() +
+    geom_text(aes(Var2, Var1, label = value), size = 3, color = "white") +
+    labs(x = "", y = "") +
+    scale_fill_viridis() +
+    theme_bw()
+```
+
+### VIF Check
+Now we'll use generalized VIF to check for multicollinearity among all predictors. The largest GVIF scores are associated with prevchd and prevap, as expected. We can see the relationship between blood pressure variables and smoking variables, as well, although associated VIF scores don't appear to be overly problematic.  
+```{r}
+vif_data <- data.10yr_followup %>% select(-c(randid, timestrk_10yr))
+logreg_model <- glm(stroke_10yr ~ ., data = vif_data, family = binomial)
+car::vif(logreg_model)
+```
+
+Removing prevap reduces multicollinearity associated with prevchd significantly.  
+```{r}
+vif_data.remove <- data.10yr_followup %>% select(-c(randid, timestrk_10yr, prevap))
+logreg_model.remove <- glm(stroke_10yr ~ ., data = vif_data.remove, family = binomial)
+car::vif(logreg_model.remove)
+```
+
+The table below verifies that there are no incidences in which a subject has prevmi and no prevchd, which verifies that prevchd encompasses prevmi. We can remove this from survival analysis accordingly.  
+```{r}
+table(data.10yr_followup$prevchd, data.10yr_followup$prevmi)
+table(data.10yr_followup$prevchd, data.10yr_followup$prevap)
+```
+
+### Glucose & Diabetes
+Glucose levels are missing for nearly 10% of observations, and there is scientific reason to believe that glucose levels might be related to diabetes status (i.e., those with diabetes tend to have high blood-glucose levels). Below we observe distributions of glucose for those with and without diabetes, as well as perform a t-test to test for mean glucose differences based on diabetes status. The conclusion here is we can drop the glucose variable; abnormally high glucose levels will be indicated by the diabetes label.  
+
+```{r}
+# Select data for test
+data.glucose_check <- data.10yr_followup %>%
+  select(diabetes, glucose) %>%
+  drop_na()
+
+# Perform t-test
+t.test(data.glucose_check %>% filter(diabetes == "No") %>% pull(glucose),
+       data.glucose_check %>% filter(diabetes == "Yes") %>% pull(glucose),
+       paired = FALSE)$p.value
+
+# Density & violin plots
+glucose.density_plot <- data.glucose_check %>%
+  ggplot(aes(x = glucose)) +
+    geom_density(aes(color = factor(diabetes)), lwd = 1.2, alpha = 0.5) +
+    scale_color_manual(values = wes_palette("Royal1")) +
+    labs(x = "Glucose", y = "Density") +
+    guides(color = guide_legend(title = "Diabetes")) +
+    theme_bw() +
+    theme(axis.title = element_text(size = 10),
+          strip.text.x = element_text(size = 8),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.title = element_text(size = 10))
+
+glucose.violin_plot <- data.glucose_check %>%
+  ggplot(aes(x = diabetes, y = glucose)) +
+    geom_violin(aes(fill = factor(diabetes))) +
+    geom_boxplot(fill = "white", width = 0.05) +
+    geom_jitter(width = 0.05, alpha = 0.3) +
+    scale_fill_manual(values = wes_palette("Royal1")) +
+    labs(x = "", y = "Glucose") +
+    guides(fill = guide_legend(title = "Diabetes")) +
+    theme_bw() +
+    theme(axis.title = element_text(size = 10),
+          strip.text.x = element_text(size = 8),
+          panel.grid.minor = element_blank(),
+          legend.position = "bottom",
+          legend.title = element_text(size = 10))
+
+# Plot together
+outcome_dens_plot <- ggarrange(
+  glucose.density_plot, glucose.violin_plot, ncol = 2, common.legend = TRUE, legend = "bottom"
+)
+outcome_dens_plot
+```
+
+## Variable Screening Resultant Data
+The resultant data set has considerably less missing data.
+```{r}
+data.post_screening <- data.10yr_followup %>%
+  # Opt for smoking status over count/day (no missing data or reliability concerns)
+  select(-cigpday) %>%
+  # Multicollinearity variable removal
+  select(-c(prevap, prevmi, glucose, diabp))
+
+# Visualization of missingness
+data.post_screening %>%
+  naniar::vis_miss() +
+  scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 0, size = 8)) +
+  guides(fill = guide_legend(title = "Missing"))
+
+# MCAR test - Result: Data are not MCAR (p < 0.001)
+data.post_screening %>% mcar_test()
+```
+
+# Variable Selection & Analysis
+
+## Model Fitting (Complete Case Analysis)
+### Male-Specific Complete-Case Model
+```{r}
+# Complete case analysis check, without glucose included
+# Total observations
+testData.male <- data.post_screening %>%
+  filter(sex == "Male") %>% select(-c(sex, randid)) %>%
+  drop_na()
+
+# LASSO model for male subjects
+# Select covariates for X and time/status for y
+X.male <- testData.male %>% select(-c(timestrk_10yr, stroke_10yr))
+X.male <- model.matrix(~ .-1, X.male) # Creates dummy variables for X
+y.male <- testData.male %>% select(time = timestrk_10yr, status = stroke_10yr) %>% as.matrix
+
+# 5-fold CV for lambda selection
+# No need to re-fit the model with the optimal lambda; can pull coefficients directly
+set.seed(1)
+surv_cvfit.male <- cv.glmnet(X.male, Surv(time = y.male[, 1], event = y.male[, 2]), 
+                             family = "cox", type.measure = "C", nfolds = 5)
+
+# Extract hazard ratios
+lambda_optimal.male <- surv_cvfit.male$lambda.min # This is the "optimal" value of lambda
+coef_HR.male <- as.matrix(exp(coef(surv_cvfit.male, s = "lambda.min"))) %>% 
+  as.data.frame() %>%
+  magrittr::set_colnames(c("lasso_estimate")) %>%
+  round(digits = 2)
+
+# Survival curve
+#survival_mod.male <- survfit(survFit.male, s = lambda_optimal.male, data = testData.male,
+#                             x = X.male, y = Surv(time = y.male[, 1], event = y.male[, 2]))
+
+#ggsurvplot(fit = survival_mod.male, xlab = "Day", 
+#           ylab = "Survival Probability", palette = c("#221D23", "#DDB967"),
+#           font.x = c(10), font.y = c(10), font.tickslab = c(10), 
+#           #risk.table = TRUE, tables.height = 0.30, pval = TRUE, conf.int = TRUE, 
+#           surv.median.line = "hv", censor = TRUE, xlim = c(0, 365*10), ylim = c(0.8, 1))
+
+# Non-regularized model for male subjects
+surv_noreg.male <- coxph(Surv(timestrk_10yr, stroke_10yr) ~ ., data = testData.male)
+
+# Merge results
+surv_results.male <- surv_noreg.male %>% 
+  broom::tidy(exp = TRUE, conf.int = TRUE) %>% 
+  as.data.frame() %>% 
+  select(-c(std.error, statistic)) %>%
+  column_to_rownames("term") %>% 
+  round(digits = 2) %>% 
+  merge(coef_HR.male, by = "row.names") %>% 
+  column_to_rownames("Row.names") %>% 
+  relocate(lasso_estimate, .before = estimate)
+
+surv_results.male
+
+# Multiple imputation non-reglularized model
+imp <- mice(testData.male, m = 5) #impute trt
+fit <- with(imp, coxph(Surv(timestrk_10yr, stroke_10yr) ~ age + bmi + bpmeds + 
+                       cursmoke + diabetes + diabp + educ + heartrte + prevchd + 
+                       prevhyp + sysbp + totchol))
+summary(pool(fit)) %>%
+  as.data.frame() %>%
+  column_to_rownames("term") %>%
+  mutate(estimate = exp(estimate)) %>%
+  round(3) %>%
+  select(estimate, p.value) %>%
+  merge(surv_results.male, by = "row.names") %>% 
+  column_to_rownames("Row.names")
+```
+
+### Male-Specific Multiple Imputation Model
+```{r}
+imp <- mice(testData.male, m = 10)
+complete_imp <- complete(imp, action = "long", inc = T)
+
+for (i in seq(1, 10)){
+  
+  # Select imputed set
+  
+  imp_data <- complete_imp %>% filter(.imp == i) %>% select(-c(.imp, .id))
+  mod <- coxph(Surv(timestrk_10yr, stroke_10yr) ~ ., data = imp_data)
+  print(mod %>% broom::tidy(exp = TRUE, conf.int = TRUE))
+  #X.imp <- imp_data %>% select(-c(timestrk_10yr, stroke_10yr))
+  #X.imp <- model.matrix(~ .-1, X.imp)
+  #y.imp <- imp_data %>% select(time = timestrk_10yr, status = stroke_10yr) %>% as.matrix
+  
+  # Cross-validation to select lambda
+  #set.seed(1)
+  #surv_cvfit <- cv.glmnet(X.imp, Surv(time = y.imp[, 1], event = y.imp[, 2]), 
+  #                        family = "cox", type.measure = "C", nfolds = 5)
+  #coef_HR <- as.matrix(exp(coef(surv_cvfit, s = "lambda.min")))
+  #print(coef_HR)
+}
+
+```
+
+
+### Female-Specific Model
+```{r}
+# Complete case analysis check, without glucose included
+# Total observations
+testData.female <- data.post_screening %>%
+  filter(sex == "Female") %>% select(-c(sex, randid)) %>%
+  drop_na()
+
+# LASSO model for female subjects
+# Select covariates for X and time/status for y
+X.female <- testData.female %>% select(-c(timestrk_10yr, stroke_10yr))
+X.female <- model.matrix(~ .-1, X.female) # Creates dummy variables for X
+y.female <- testData.female %>% select(time = timestrk_10yr, status = stroke_10yr) %>% as.matrix
+
+# 5-fold CV for lambda selection
+# No need to re-fit the model with the optimal lambda; can pull coefficients directly
+set.seed(1)
+surv_cvfit.female <- cv.glmnet(X.female, Surv(time = y.female[, 1], event = y.female[, 2]), 
+                             family = "cox", type.measure = "C", nfolds = 5)
+
+# Extract hazard ratios
+lambda_optimal.female <- surv_cvfit.female$lambda.min # This is the "optimal" value of lambda
+coef_HR.female <- as.matrix(exp(coef(surv_cvfit.female, s = "lambda.min"))) %>% 
+  as.data.frame() %>%
+  magrittr::set_colnames(c("lasso_estimate")) %>%
+  round(digits = 2)
+
+# Survival curve
+#survival_mod.female <- survfit(survFit.female, s = lambda_optimal.female, data = testData.female,
+#                             x = X.female, y = Surv(time = y.female[, 1], event = y.female[, 2]))
+
+#ggsurvplot(fit = survival_mod.female, xlab = "Day", 
+#           ylab = "Survival Probability", palette = c("#221D23", "#DDB967"),
+#           font.x = c(10), font.y = c(10), font.tickslab = c(10), 
+#           #risk.table = TRUE, tables.height = 0.30, pval = TRUE, conf.int = TRUE, 
+#           surv.median.line = "hv", censor = TRUE, xlim = c(0, 365*10), ylim = c(0.8, 1))
+
+# Non-regularized model for female subjects
+surv_noreg.female <- coxph(Surv(timestrk_10yr, stroke_10yr) ~ ., data = testData.female)
+
+# Merge results
+surv_results.female <- surv_noreg.female %>% 
+  broom::tidy(exp = TRUE, conf.int = TRUE) %>%  
+  as.data.frame() %>% 
+  select(-c(std.error, statistic)) %>% 
+  column_to_rownames("term") %>% 
+  round(digits = 2) %>% 
+  merge(coef_HR.female, by = "row.names") %>% 
+  column_to_rownames("Row.names") %>% 
+  relocate(lasso_estimate, .before = estimate)
+
+surv_results.female
+
+# Multiple imputation non-reglularized model
+imp <- mice(testData.female, m = 5)
+fit <- with(imp, coxph(Surv(timestrk_10yr, stroke_10yr) ~ age + bmi + bpmeds + 
+                       cursmoke + diabetes + diabp + educ + heartrte + prevchd + 
+                       prevhyp + sysbp + totchol))
+summary(pool(fit)) %>%
+  as.data.frame() %>%
+  column_to_rownames("term") %>%
+  mutate(estimate = exp(estimate)) %>%
+  round(3) %>%
+  select(estimate, p.value) %>%
+  merge(surv_results.female, by = "row.names") %>% 
+  column_to_rownames("Row.names")
+```
+
+# Results
+
+Table 1 describes the cohort demographics stratified by sex. Separate survival analyses will be performed for each sex using Cox proportional-hazards models. The LASSO regularization method will be used for variable selection in each proportional-hazards model. Variable selection will therefore be done separately for each sex since each model will be sex-specific. Assumptions of proportional-hazards will be checked for each model.  
+\newline
+
+```{r, echo=FALSE}
+# Table 1 (source: https://cran.r-project.org/web/packages/tableone/vignettes/introduction.html)
+vars <- c("stroke_10yr", "age", "bmi", "totchol", "sysbp", "diabp", "cursmoke")
+cat_vars <- c("stroke_10yr", "cursmoke")
+table1 <- CreateTableOne(vars = vars, factorVars = cat_vars, strata = "sex", data = data.10yr_followup)
+print(table1, print = F, nonnormal = T, minMax = F, contDigits=1) %>% 
+  as.data.frame() %>% 
+  select(-test, -p) %>%
+  slice(-1) %>%
+  #set_colnames(c("Male, n = 1930", "Female, n = 2472")) %>%
+  set_rownames(c("10-Year Stroke Event Count (%)", "Age", "BMI", 
+                 "Total Cholesterol", "Systolic BP", "Diastolic BP", "Current Smoker (%)")) %>%
+  knitr::kable(caption = "Cohort demographics stratified by sex.",
+               booktabs = T, longtable = TRUE) %>%
+  footnote(general = "Note: Continuous clinical data are reported as median [IQR].",
+           general_title = "")
+```
+
+

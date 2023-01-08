@@ -1,10 +1,16 @@
 ---
-title: 'Longitudinal Project Update: EDA'
-author: "Brenton Graham"
-date: '2022-11-18'
-output: 
-  html_document:
-    code_folding: hide
+title: |
+ | \vspace{-1cm} Longitudinal Project: EDA & Project Conception
+author: |
+ | \vspace{-0.5cm} Brenton Graham \vspace{0cm}
+date: |
+ | 2022-11-18
+geometry: "left=2cm,right=2cm,top=2cm,bottom=2cm"
+header-includes:
+  - \usepackage{multirow}
+output:
+  pdf_document
+fontsize: 11pt
 ---
 
 ```{r setup, include=FALSE}
@@ -40,33 +46,26 @@ data <- read_delim("883LongitudinalData.csv", delim=",") %>%
 `%not in%` <- Negate(`%in%`)
 healthy_ids <- data %>% filter(time == "T1") %>% filter(elastase < 1) %>% pull(sid)
 data.include <- data %>% filter(sid %not in% healthy_ids)
-
-# Output SAS data
-sas_data <- data.include
-sas_data$log_elastase[which(is.na(sas_data$log_elastase))] <- "."
-sas_data %>% write.table(file = "883LongitudinalData_SAS.csv", row.names = FALSE, sep = ",")
 ```
 
 ### Subjects & Repeated Measures
-Data from 17 unique subjects and 19 pulmonary exacerbations are present in this data set (i.e., two subjects had exacerbations on two separate occasions). For each exacerbation there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days.  
+Data from 35 unique subjects and 40 pulmonary exacerbations are present in this data set (i.e., five subjects had exacerbations on two separate occasions). For each exacerbation there are three repeated measures (T1 = Admission, T2 = Hospital Discharge, T3 = Follow-Up Visit). Time points are approximately separated by 10-14 days.
 ```{r}
 data.include %>%
   filter(time == "T1") %>%
   table1(~gender + age + bmi + genotype + admit.cf_pathogens + admit.coinfect, 
-         caption = "Table 1. Demographics of study population.", data = .)
+         caption = "Demographics of study population.", data = .)
 ```
 
-### Variable Description
-#### Outcomes
-We're interested in modeling several potential response outcomes over time, including the following.
+### Potential Outcomes 
+We're interested in modeling several potential response outcomes over time:
 
 - fev1_pred: FEV1, a measure of lung function (the higher the better) 
 - pes_total: PEx score (the lower the better) 
-- crp: C-reactive protein, a measure of inflammation (the lower the better)  
-- elastase: An enzyme marker
-- We could possibly be interested in modeling 16S taxa counts
+- crp: C-reactive protein, a measure of inflammation (the lower the better) 
+- elastase: An enzyme marker 
 
-```{r}
+```{r, fig.dim=c(8, 4)}
 # Function to plot density of outcomes
 plot.density <- function(data, outcome, title) {
   palette = c("goldenrod1", "red", "skyblue1")
@@ -101,7 +100,7 @@ dist_fig <- ggarrange(density.fev1, density.pes, density.crp, density.elast,
 show(dist_fig)
 ```
 
-```{r}
+```{r, fig.dim=c(8, 4)}
 # Function to plot spaghetti plots of outcomes over time
 plot.spaghetti <- function(data, outcome, title) {
   plot <- data %>%
@@ -129,28 +128,29 @@ spaghetti_fig <- ggarrange(spaghetti.fev1, spaghetti.pes, spaghetti.log_crp, spa
 show(spaghetti_fig)
 ```
 
-#### Explanatory Variables
+\newpage
+
+### Explanatory Variables
 In this data set we have a collection of interesting explanatory variables. These include important CF pathogen measures (from both culture and 16S rRNA sequencing) and viral measures at admission. Well known CF pathogens include Pseudomonas aeruginosa, Staphylococcus aureus, Haemophilus influenzae, Stenotrophomonas maltophilia, Achromobacter xylosoxidans and Burkholderia cepacia.  
 
 In general, we'd like to get a sense of whether or not there is anything at admission that can be used to predict the subject's response to treatment. To simplify things, we will test two primary explanatory variables: 
 
-1. **Number of CF pathogens detected at admission.** This is the sum of binary detection results from culture. There are some studies suggesting that increased CF pathogens has negative impacts on treatment response.    
+1. **Number of CF pathogens detected at admission.** This is the sum of binary detection results from culture. There are some studies suggesting that increased CF pathogens has negative impacts on treatment response.
 
-2. **Bacterial/Viral co-infection at admission.** This is a binary variable that indicates whether or not **both** CF and viral pathogens were detected when the subject was admitted.  
+2. **Bacterial/Viral co-infection at admission.** This is a binary variable that indicates whether or not **both** CF and viral pathogens were detected when the subject was admitted.
 
-
-#### Additional Predictors / Precision Variables
+### Additional Predictors/Precision Variables
 The following variables will be included as covariates in all models.
 
-- Gender  
-- Age  
-- BMI  
+- Gender
+- Age
+- BMI
 - Number of hospitalizations in the past year
-- Genotype: There is a specific genetic mutation of interest in CF patients. This variable indicates the number of F508del mutations.  
+- Genotype: There is a specific genetic mutation of interest in CF patients. This variable indicates the number of F508del mutations
 
-### Missing Data in Our Outcomes
-There are some missing data in our outcome variables (shown below).  
-```{r}
+### Missing Data
+There are some missing data in both our outcome and explanatory variables (shown below).  
+```{r, fig.dim=c(8, 3)}
 # Visualize missingness
 data.include %>% vis_miss() +
   scale_fill_manual(values = c("gray15", "darkgoldenrod")) +
@@ -159,16 +159,15 @@ data.include %>% vis_miss() +
   guides(fill = guide_legend(title = "Missing"))
 ```
 
-
 ## Analysis
-There aren't necessarily any obvious grouping variables in this data set (i.e., there aren't treatment groups for which we'd like to compare). However, we are interested in the trajectory of our outcomes and it would be biologically interesting to assess if certain factors are associated with distinct outcome trajectories. To accomplish this we can use a latent class mixture model to cluster subjects into latent classes based on outcome trajectories. Once classes are assigned, we can use post-hoc analysis methods to characterize risk factor profiles that might be driving the trajectory differences. Baseline clinical markers will be used in this latent class-separation analysis. This will allow us to determine if there are any baseline indicators of treatment response trajectory.  
+There aren't necessarily any obvious grouping variables in this data set (i.e., there aren't treatment groups for which we'd like to compare). However, we are interested in the trajectory of our outcomes and it would be biologically interesting to assess if certain factors are associated with distinct outcome trajectories. To accomplish this we can use a latent class mixture model to cluster subjects into latent classes based on outcome trajectories. Once classes are assigned, we can use post-hoc analysis methods to characterize risk factor profiles that might be driving the trajectory differences. Baseline clinical markers will be used in this latent class-separation analysis. This will allow us to determine if there are any baseline indicators of treatment response trajectory.
 
 ### Latent Class Mixed Modeling
-In the first step of the analysis we will fit a latent class mixed model. Based on discussions with investigators, the elastase marker might make for the most biologically interesting latent class results. It will be most practical and appropriate to treat time as a class variable for the following reasons. First, there are only three time points, so we do not need to be concerned about the number of parameters we incorporate in the model. Second, modeling time as a class variable allows for the most flexibility. From the spaghetti plots it is obvious that the effect of time on the outcomes is not linear; quadratic relationships likely exists between time and the outcomes. Modeling time as a class variable will allow us to account for this.  
+In the first step of the analysis we will fit a latent class mixed model. Based on discussions with investigators, the elastase marker might make for the most biologically interesting latent class results. It will be most practical and appropriate to treat time as a class variable for the following reasons. First, there are only three time points, so we do not need to be concerned about the number of parameters we incorporate in the model. Second, modeling time as a class variable allows for the most flexibility. From the spaghetti plots it is obvious that the effect of time on the outcomes is not linear; quadratic relationships likely exists between time and the outcomes. Modeling time as a class variable will allow us to account for this.
 
-Looking at the data structure, we should account for within-subject correlation. We can also consider including a random effect for the time variable since each time point relates to different outcome expectations (i.e., at time point 1 the subject is experiencing an exacerbation; at time point 2 the subject is on antibiotics and symptoms/outcomes are expected to improve). In other words, there should be some between-subject correlation at each time point. This is something that I'm not entirely confident in, however, and need to spend more time thinking about.    
+Looking at the data structure, we should account for within-subject correlation. We can also consider including a random effect for the time variable since each time point relates to different outcome expectations (i.e., at time point 1 the subject is experiencing an exacerbation; at time point 2 the subject is on antibiotics and symptoms/outcomes are expected to improve). In other words, there should be some between-subject correlation at each time point. This is something that I'm not entirely confident in, however, and need to spend more time thinking about.
 
-#### Latent Class Model Selection
+### Latent Class Model Selection
 This method requires users to specify the number of latent classes that should be created. As such, there is a model selection step. Below are results from models using 1-5 latent classes. Standard information criteria can be used to select the optimal number of latent classes.  
 ```{r}
 # Latent class mixed modeling; a random intercept is included by default
@@ -198,7 +197,7 @@ m5 <- gridsearch(
        ng = 5, idiag = T, data = data.include, verbose = F), rep = 50, maxiter = 10, minit = m1)
 
 # Model comparison
-summarytable(m1, m2, m3, m4, m5, which = c("G", "loglik", "AIC", "BIC", "%class"))
+summarytable(m1, m2, m3, m4, m5, which = c("G", "loglik", "AIC", "%class")) 
 
 # Merge SID latent class assignments
 latent_classes <- m2$pprob[, 1:2] %>%
@@ -213,9 +212,9 @@ data.latent_incl <- data.include %>%
   mutate(ng2 = factor(ng2), ng3 = factor(ng3), ng4 = factor(ng4), ng5 = factor(ng5))
 ```
 
-#### Latent Class Visualization
+### Latent Class Visualization
 Below we can see how these clusters look based on number of clusters and outcome trajectory.
-```{r}
+```{r, fig.dim=c(8, 5)}
 # Function to plot spaghetti plots of outcomes over time colored by latent class
 plot.latent.spaghetti <- function(data, outcome, group, title) {
   plot <- data %>%
@@ -243,16 +242,8 @@ latent_fig <- ggarrange(lcmm.ng2, lcmm.ng3, lcmm.ng4, lcmm.ng5, ncol=2, nrow=2)
 show(latent_fig)
 ```
 
-#### Mixed Model Results
+### Mixed Model Results
 Below is an example of the results that can be viewed for each model. I still need to look into which number of classes makes the most sense. We can use the table above, which displays AIC, BIC, and the number of subjects assigned to each latent class, to decide on this. I also need to figure out how to display random effects estimates.  
-```{r}
-summary(m4)
-```
-
-```{r}
-latentClass_results <- m4$pprob
-latentClass_results
-```
 
 
 

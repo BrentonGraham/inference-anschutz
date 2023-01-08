@@ -1,33 +1,20 @@
----
-title: "883 Longitudinal Data Preparation"
-author: "Brenton Graham"
-date: "Last Edited: 10/26/2022"
-output: 
-  html_document:
-    code_folding: hide
----
+# Author: Brenton Graham
+# Last Edited: 10/26/2022
+# Description: Script to select and pre-process relevant data for longitudinal analysis project 
 
-```{r setup, include=FALSE, echo=FALSE}
-knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
-library(tidyverse)
+# Import packages
+require(tidyverse)
 require(phyloseq)
 require(microbiome)
-```
 
-# Filter Data for Longitudinal Project 
-
-The following inclusion criteria were used for downstream analysis:  
-
-* SID > 25 (SID <= 25 excluded)  
-* 3 samples were each run on 2 separate proteomics batches to control for batching effect. Since proteomics data is not used in this analysis, dropping these replicates results in 3 dropped observations.  
-* Only sputum samples were kept. This will be necessary if we want to bring in the 16S data.
-
-```{r}
-# Full set mutliomics set
+# Import full multiomics set
 multiomics_set <- paste("/Users/bgraham/Research/883/Data/Merged Data/883MergedData.20221026.csv", sep="/") %>% 
   read_delim(delim=",")
 
 # Enforce inclusion criteria
+# 3 samples were each run on 2 separate proteomics batches to control for batching effect. 
+# Since proteomics data is not used in this analysis, dropping these replicates results in 3 dropped observations.
+# Only sputum samples were kept. This will be necessary if we want to bring in the 16S data.
 inclusion_data <- multiomics_set %>%
   dplyr::select(-proteomics_batch, -contains("seq.")) %>% # Remove proteomics data
   unique() %>%                                     # 6 observations lost here
@@ -40,9 +27,9 @@ inclusion_data <- multiomics_set %>%
   ) %>%
   mutate(bmi = weight / ((height * 0.01)^2)) %>%
   dplyr::select(sid, time, sid_first, ex_num, gender, genotype, age, bmi, pe_pastyr, 
-         hosp_pastyr, admit_novirus, negative, pseudo_aer, staph_aur, 
-         achromobacter, hflu, smalto, burk, pe_pastyr, fev1_pred, pes_total, 
-         crp, elastase, contains("Bacteria/")) %>%
+                hosp_pastyr, admit_novirus, negative, pseudo_aer, staph_aur, 
+                achromobacter, hflu, smalto, burk, pe_pastyr, fev1_pred, pes_total, 
+                crp, elastase, contains("Bacteria/")) %>%
   # Binary variables
   mutate(pseudo_aer = ifelse(is.na(pseudo_aer), NA, ifelse(pseudo_aer == 0, 0, 1)),
          pseudo_aer = as.numeric(ifelse(negative == 1, 0, pseudo_aer)),
@@ -83,8 +70,8 @@ baseline_pathogens <- inclusion_data %>%
     admit.coinfect = factor(case_when(
       admit.coinfect <= 1 ~ 0,
       admit.coinfect > 1 ~ 1
-      ))
-    ) %>%
+    ))
+  ) %>%
   dplyr::select(sid, admit.virus, admit.cf_pathogens, admit.coinfect) %>%
   arrange(sid)
 
@@ -109,16 +96,16 @@ tax_table <- plyr::ldply(otu_tax_split, rbind)[-1] %>%
 # Phyloseq object
 physeq <- phyloseq(otu_table(otu_table), tax_table(tax_table), sample_data(metadata))
 microbiomeCLR <- physeq %>%
-    microbiome::transform("clr")
+  microbiome::transform("clr")
 
 # Final microbiome set with CLR transform
 CLR <- abundances(microbiomeCLR) %>% t() %>% as.data.frame() %>%
   merge(physeq %>% sample_data(), by = 'row.names') %>%
   column_to_rownames("Row.names") %>%
   dplyr::select(sid_first, sid, time, 
-        contains("Pseudomonas aeruginosa"), contains("Staphylococcus aureus"),
-        contains("Achromobacter"), contains("Haemophilus"), contains("Stenotrophomonas"), 
-        contains("Bacteria/Proteobacteria/Betaproteobacteria/Burkholderiales/Burkholderiaceae/Burkholderia"))
+                contains("Pseudomonas aeruginosa"), contains("Staphylococcus aureus"),
+                contains("Achromobacter"), contains("Haemophilus"), contains("Stenotrophomonas"), 
+                contains("Bacteria/Proteobacteria/Betaproteobacteria/Burkholderiales/Burkholderiaceae/Burkholderia"))
 
 # Remove ineligible SIDs from inclusion set
 longitudinal_data <- inclusion_data %>%
@@ -145,198 +132,13 @@ longitudinal_data <- inclusion_data %>%
     hflu.seq = "Bacteria/Proteobacteria/Gammaproteobacteria/Pasteurellales/Pasteurellaceae/Haemophilus",
     smalto.seq = "Bacteria/Proteobacteria/Gammaproteobacteria/Xanthomonadales/Xanthomonadaceae/Stenotrophomonas",
     burk.seq = "Bacteria/Proteobacteria/Betaproteobacteria/Burkholderiales/Burkholderiaceae/Burkholderia"
-    ) %>%
+  ) %>%
   arrange(sid_first, sid, time) %>%
   dplyr::select(sid, time, sid_first, ex_num, gender, genotype, age, contains("cult"),
-         contains("seq"), contains("admit"), everything())
-
+                contains("seq"), contains("admit"), everything())
 
 # Number of unique subjects: 21 (2 subjects with 2 PEx)
 longitudinal_data %>% dplyr::select(sid_first) %>% unique() %>% nrow()
 
 # Output data set
 longitudinal_data %>% write.table("883LongitudinalData.csv", sep = ",", row.names = F)
-```
-
-
-# Visualizing Outcomes
-## Outcome Distributions
-```{r, message=FALSE}
-# FEV-1
-longitudinal_data %>%
-  ggplot(aes(x = fev1_pred)) +
-  geom_histogram(bins = 10) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# PEx Score
-longitudinal_data %>%
-  ggplot(aes(x = pes_total)) +
-  geom_histogram(bins = 10) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# CRP
-longitudinal_data %>%
-  ggplot(aes(x = crp)) +
-  geom_histogram(bins = 10) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# Elastase
-longitudinal_data %>%
-  ggplot(aes(x = elastase)) +
-  geom_histogram(bins = 10) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-```
-
-```{r, message=FALSE}
-# FEV-1
-longitudinal_data %>%
-  ggplot(aes(x = time, y = fev1_pred)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# PEx Score
-longitudinal_data %>%
-  ggplot(aes(x = time, y = pes_total)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# CRP
-longitudinal_data %>%
-  ggplot(aes(x = time, y = crp)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# Elastase
-longitudinal_data %>%
-  ggplot(aes(x = time, y = elastase)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-```
-
-
-## Spaghetti Plot by Co-Infection Status
-```{r, message=FALSE}
-# FEV-1
-longitudinal_data %>%
-  ggplot(aes(x = time, y = fev1_pred)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.coinfect) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# PEx Score
-longitudinal_data %>%
-  ggplot(aes(x = time, y = pes_total)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.coinfect) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# CRP
-longitudinal_data %>%
-  ggplot(aes(x = time, y = crp)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.coinfect) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# Elastase
-longitudinal_data %>%
-  ggplot(aes(x = time, y = elastase)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.coinfect) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-```
-
-## Spaghetti Plot by Number of Detectable CF Pathogens
-```{r}
-# FEV-1
-longitudinal_data %>%
-  ggplot(aes(x = time, y = fev1_pred)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.cf_pathogens) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# PEx Score
-longitudinal_data %>%
-  ggplot(aes(x = time, y = pes_total)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.cf_pathogens) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# CRP
-longitudinal_data %>%
-  ggplot(aes(x = time, y = crp)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.cf_pathogens) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-
-# Elastase
-longitudinal_data %>%
-  ggplot(aes(x = time, y = elastase)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~admit.cf_pathogens) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-```
-
-```{r}
-# CRP
-longitudinal_data %>%
-  ggplot(aes(x = time, y = crp)) +
-  geom_point(size = 0.5) +
-  geom_smooth() +
-  geom_line(alpha = 0.6, aes(group = sid)) +
-  facet_wrap(~staph_aureus) +
-  theme_bw() +
-  theme(panel.grid.minor = element_blank())
-```
-
-
-
-
-# Outcomes
-- fev1_pred
-- pes_total
-- crp
-- elastase
-
-
-
-

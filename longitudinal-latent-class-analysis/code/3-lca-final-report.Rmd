@@ -36,8 +36,8 @@ data <- read_delim("883LongitudinalData.csv", delim=",") %>%
          hosp_pastyr = case_when(
            hosp_pastyr == 0 ~ "0",
            hosp_pastyr == 1 ~ "1",
-           hosp_pastyr > 1 ~ "2+"
-         ), hosp_pastyr = factor(hosp_pastyr, levels = c("0", "1", "2+")),
+           hosp_pastyr > 1 ~ "2+"), 
+         hosp_pastyr = factor(hosp_pastyr, levels = c("0", "1", "2+")),
          log_crp = log(crp),
          log_elastase = log(elastase)) %>%
   dplyr::select(-pe_pastyr) %>%
@@ -340,8 +340,7 @@ sumtable <- summarytable(
   as.data.frame() %>%
   round(1) %>%
   replace(is.na(.), "") %>%
-  set_colnames(c("LC", "AIC", 
-                 "LC1", "LC2", "LC3", "LC4", "LC5")) %>%
+  set_colnames(c("LC", "AIC", "LC1", "LC2", "LC3", "LC4", "LC5")) %>%
   mutate(LC1= ifelse(LC1 == "", "", paste(LC1, "%", sep = "")),
          LC2 = ifelse(LC2 == "", "", paste(LC2, "%", sep = "")),
          LC3 = ifelse(LC3 == "", "", paste(LC3, "%", sep = "")),
